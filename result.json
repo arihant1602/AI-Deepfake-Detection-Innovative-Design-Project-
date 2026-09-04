@@ -1,0 +1,18 @@
+{
+  "layer": "camera_sensor_noise_profiling",
+  "frames_analyzed": 90,
+  "frames_with_face": 90,
+  "score": 0.6926,
+  "flagged": true,
+  "confidence": 1.0,
+  "components": {
+    "inter_frame_persistence": 0.0002,
+    "persistence_anomaly": 0.999,
+    "pce_score": 12.05,
+    "pce_anomaly": 0.7323,
+    "prnu_correlation": 0.0211,
+    "ncc_anomaly": 0.5774,
+    "noise_floor_adequacy": 1.0
+  },
+  "explanation": "Clip flagged as likely synthetic / injected deepfake: lack of stationary CMOS sensor PRNU noise persistence (corr=0.000); absence of sharp cross-correlation energy peak (PCE=12.1); near-zero PRNU correlation coefficient (0.0211)."
+}
