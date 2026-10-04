@@ -315,3 +315,48 @@ def evaluate_client_attestation(payload: Union[str, Dict[str, Any]]) -> Dict[str
 
     # Default fallback: run real live probe
     return probe_host_integrity()
+
+
+def probe_uploaded_file_provenance(video_path: str) -> Dict[str, Any]:
+    """
+    Evaluates origin provenance for a standalone uploaded video file:
+    - Inspects container format, streams, and encoder tags (e.g. FFmpeg/Lavf vs native hardware encoders).
+    - Notes that without an active client attestation session, device environment is UNATTESTED.
+    - Defers definitive physical authenticity verification to Gate 2 (PRNU) and Gate 3 (Temporal dynamics).
+    """
+    t0 = time.perf_counter()
+    import subprocess
+    cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_format", "-show_streams", video_path
+    ]
+    encoder = "Unknown"
+    is_software = False
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+        if res.returncode == 0:
+            meta = json.loads(res.stdout)
+            tags = meta.get("format", {}).get("tags", {})
+            encoder = tags.get("encoder", tags.get("compatible_brands", "Unknown"))
+            is_software = any(s in str(encoder).lower() for s in ["lavf", "ffmpeg", "handbrake", "obs", "premiere", "python"])
+    except Exception:
+        pass
+
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+
+    return {
+        "passed": True,
+        "blocked": False,
+        "root_detected": False,
+        "emulator_detected": False,
+        "virtual_camera_detected": is_software,
+        "is_file_upload": True,
+        "encoder": encoder,
+        "is_software_encoder": is_software,
+        "latency_ms": round(latency_ms, 2),
+        "verdict": "UNATTESTED_ORIGIN" if not is_software else "FLAG_FOR_REVIEW",
+        "details": (
+            f"Standalone video upload: no live client attestation payload attached. "
+            f"Container encoder: '{encoder}'. Defers to Gate 2 (PRNU sensor noise) and Gate 3 (Temporal forensics)."
+        ),
+    }

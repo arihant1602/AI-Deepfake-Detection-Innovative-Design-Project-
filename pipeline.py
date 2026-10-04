@@ -91,13 +91,32 @@ def extract_frames(video_path: str, max_frames: int = 60) -> List[Any]:
 
 
 # Gate 1: Hardware Integrity Check (Aarya's Layer 1 Attestation Engine)
-def check_hardware_attestation(attestation_input: Optional[Union[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+def check_hardware_attestation(
+    attestation_input: Optional[Union[str, Dict[str, Any]]] = None,
+    video_path: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Evaluates hardware and OS integrity per CEN/TS 18099 Gate 1:
     - If attestation_input is None or 'live': executes real-time live host system and video device probes.
+    - If attestation_input is 'file_upload' or 'unattested': inspects container format, stream tags, and encoder provenance.
     - If attestation_input is a dict/JSON string: evaluates client attestation payload.
-    - If attestation_input is a simulation string: evaluates predefined test vector.
+    - If attestation_input is a simulation preset string: evaluates predefined test vector.
     """
+    if attestation_input in ("file_upload", "unattested", "Standalone File Upload (No Client Attestation)"):
+        if video_path and os.path.exists(video_path):
+            return host_integrity.probe_uploaded_file_provenance(video_path)
+        return {
+            "passed": True,
+            "blocked": False,
+            "root_detected": False,
+            "emulator_detected": False,
+            "virtual_camera_detected": False,
+            "is_file_upload": True,
+            "latency_ms": 0.1,
+            "verdict": "UNATTESTED_ORIGIN",
+            "details": "Standalone file upload: no live client attestation attached. Deferring to Gate 2/3 forensics.",
+        }
+
     if attestation_input is None or attestation_input in ("live", "live_host", "Real-Time Live Host Probe"):
         return host_integrity.probe_host_integrity()
     return host_integrity.evaluate_client_attestation(attestation_input)
@@ -233,7 +252,7 @@ def run_detection_pipeline(
       4. Complete verification verdict & frame buffer extraction
     """
     # Gate 1: Hardware / Environment Attestation
-    hw = check_hardware_attestation(attestation_mode)
+    hw = check_hardware_attestation(attestation_mode, video_path=video_path)
     if hw["blocked"]:
         return {
             "verdict": "DIGITAL INJECTION DETECTED (ENVIRONMENT COMPROMISED)",

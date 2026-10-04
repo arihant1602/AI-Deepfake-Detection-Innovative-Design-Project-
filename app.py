@@ -47,18 +47,18 @@ with st.sidebar:
     st.caption("CEN/TS 18099 Gated Verification Engine")
 
     with st.container(border=True):
-        st.subheader(":material/memory: Live Attestation Mode")
+        st.subheader(":material/memory: Gate 1 Attestation Source")
         attestation_source = st.radio(
             "Attestation Source:",
             [
-                "Real Live Host Probe",
+                "Auto (Live Probe for Camera / Provenance for File Upload)",
                 "Simulation: Clean Physical Device",
                 "Simulation: Rooted Android (Magisk/SU)",
                 "Simulation: Android Emulator (QEMU/Goldfish)",
                 "Simulation: Virtual Camera Injection (OBS)",
             ],
             index=0,
-            help="By default, runs real live host OS & video device probing. Simulation options demonstrate early termination for specific attack scenarios.",
+            help="In Auto mode: probes live hardware for webcam capture, or analyzes container provenance for file uploads. Simulation options demonstrate early termination for specific attack scenarios.",
         )
 
     with st.container(border=True):
@@ -102,9 +102,9 @@ st.divider()
 # =============================================================================
 # HELPER: FORMAT ATTESTATION ARGUMENT
 # =============================================================================
-def get_attestation_arg(selection: str):
-    if selection == "Real Live Host Probe":
-        return None
+def get_attestation_arg(selection: str, is_live: bool = False):
+    if "Auto" in selection:
+        return "live" if is_live else "file_upload"
     prefix = "Simulation: "
     if selection.startswith(prefix):
         raw = selection[len(prefix):]
@@ -169,7 +169,11 @@ def render_forensic_results(result: dict, video_path: str):
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
-            st.metric("Gate 1: Device", hw_data.get("verdict", "PASS"), delta=f"{hw_data.get('latency_ms', 0.0):.2f} ms")
+            if hw_data.get("is_file_upload"):
+                enc_tag = str(hw_data.get("encoder", "N/A"))[:12]
+                st.metric("Gate 1: Origin", "UNATTESTED", delta=f"Enc: {enc_tag}")
+            else:
+                st.metric("Gate 1: Device", hw_data.get("verdict", "PASS"), delta=f"{hw_data.get('latency_ms', 0.0):.2f} ms")
         with m2:
             st.metric("Gate 2: Static Noise", "DETECTED", delta="Physical Sensor Verified")
         with m3:
@@ -319,7 +323,7 @@ if app_mode == "Live Camera Stream":
                     st.session_state["live_clip_path"] = temp_live_path
 
                     # Execute the 3 Programmed Tests
-                    attestation_arg = get_attestation_arg(attestation_source)
+                    attestation_arg = get_attestation_arg(attestation_source, is_live=True)
 
                     with st.status("Executing 3-stage gated forensic pipeline on live capture...", expanded=True) as status:
                         st.write("Gate 1: Probing live host environment & video device integrity...")
@@ -434,7 +438,7 @@ elif app_mode == "Pre-recorded Video Analysis":
             run_btn = st.button("Run Forensic Verification", type="primary")
 
             if run_btn:
-                attestation_arg = get_attestation_arg(attestation_source)
+                attestation_arg = get_attestation_arg(attestation_source, is_live=False)
 
                 with st.status("Executing gated verification pipeline...", expanded=True) as status:
                     st.write(f"Gate 1: Evaluating client/host attestation ({attestation_source})...")
