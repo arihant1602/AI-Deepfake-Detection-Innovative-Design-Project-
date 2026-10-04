@@ -1,0 +1,16 @@
+{
+  "layer": "temporal_consistency_frequency_analysis",
+  "frames_analyzed": 90,
+  "frames_with_face": 90,
+  "score": 0.2421,
+  "flagged": false,
+  "confidence": 1.0,
+  "components": {
+    "flicker_rate": 0.5113,
+    "mean_flow_coherence": 0.5622,
+    "flow_incoherence": 0.0,
+    "temporal_periodicity_anomaly": 0.3192,
+    "hf_energy_coefficient_of_variation": 0.0223
+  },
+  "explanation": "Clip within normal variability but worth monitoring: elevated frame-to-frame flicker in texture/lighting features; periodic high-frequency spectral peak over time (synthesis artifact)."
+}
