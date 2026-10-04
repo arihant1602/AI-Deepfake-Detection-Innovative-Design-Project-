@@ -1,113 +1,562 @@
-import streamlit as st
-import tempfile
+"""
+AI Deepfake Detection & Injection Attack Defense - Streamlit Portal
+===================================================================
+Compliant with CEN/TS 18099 Gated Presentation & Injection Attack Detection.
+
+Supports:
+  1. Live Camera Stream: Real-time webcam frame buffer capture & live forensic execution.
+  2. Pre-recorded Video Analysis: Upload custom streams or run bundled benchmark simulations.
+  3. System & Attestation Inspector: Live OS hardware, video device, and virtualization audit.
+"""
+
 import os
-from pipeline import run_detection_pipeline
+import tempfile
+import time
+import cv2
+import numpy as np
+import streamlit as st
 
-st.set_page_config(page_title="IAD & Deepfake Forensics Portal", layout="wide")
+import host_integrity
+from pipeline import (
+    check_hardware_attestation,
+    check_sensor_noise,
+    check_temporal_coherence,
+    extract_frames,
+    run_detection_pipeline,
+)
 
-st.title("🛡️ Next-Gen Injection Attack & Deepfake Detection")
-st.caption("CEN/TS 18099 Compliant Gated Forensic Pipeline")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="Forensics Portal | Deepfake & Injection Attack Defense",
+    page_icon=":material/shield:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# --- SIDEBAR: CLIENT ATTESTATION SIMULATOR ---
+# --- INITIALIZE SESSION STATE ---
+if "live_clip_path" not in st.session_state:
+    st.session_state["live_clip_path"] = None
+if "live_result" not in st.session_state:
+    st.session_state["live_result"] = None
+if "prerecorded_result" not in st.session_state:
+    st.session_state["prerecorded_result"] = None
+
+# --- SIDEBAR: SYSTEM AUDIT & SETTINGS ---
 with st.sidebar:
-    st.header("📱 Layer 1 Client Attestation")
-    st.caption("Simulates metadata sent from Aarya's Android Attestation SDK.")
-    
-    attestation_state = st.selectbox(
-        "Client Attestation State:",
-        [
-            "Clean Physical Device",
-            "Compromised / Rooted Android (Magisk/SU)",
-            "Android Emulator (Goldfish/QEMU)",
-            "Virtual Camera Injection (OBS / Hooked Driver)"
-        ]
+    st.header(":material/tune: Forensic Pipeline Config")
+    st.caption("CEN/TS 18099 Gated Verification Engine")
+
+    with st.container(border=True):
+        st.subheader(":material/memory: Live Attestation Mode")
+        attestation_source = st.radio(
+            "Attestation Source:",
+            [
+                "Real Live Host Probe",
+                "Simulation: Clean Physical Device",
+                "Simulation: Rooted Android (Magisk/SU)",
+                "Simulation: Android Emulator (QEMU/Goldfish)",
+                "Simulation: Virtual Camera Injection (OBS)",
+            ],
+            index=0,
+            help="By default, runs real live host OS & video device probing. Simulation options demonstrate early termination for specific attack scenarios.",
+        )
+
+    with st.container(border=True):
+        st.subheader(":material/fingerprint: Reference PRNU Profile")
+        ref_fp_file = "camera_fingerprint.npy"
+        has_ref_fp = os.path.exists(ref_fp_file)
+        use_ref_fp = st.checkbox(
+            "Cross-correlate against enrolled camera fingerprint",
+            value=has_ref_fp,
+            disabled=not has_ref_fp,
+            help="When enabled, tests incoming frames against camera_fingerprint.npy enrolled during device registration.",
+        )
+        active_ref_fp = ref_fp_file if use_ref_fp and has_ref_fp else None
+        if active_ref_fp:
+            st.caption(f":material/check_circle: Using reference: `{ref_fp_file}`")
+        else:
+            st.caption(":material/info: Autonomous blind consistency mode (no reference).")
+
+    with st.container(border=True):
+        st.subheader(":material/info: Verification Thresholds")
+        st.markdown(
+            """
+            - **Gate 1 (Device):** Root / VM = `BLOCK`
+            - **Gate 2 (PRNU):** PCE Peak > 45.0, Anomaly < 0.55
+            - **Gate 3 (Temporal):** Flicker < 0.65, Anomaly < 0.60
+            - **Target Latency:** Sub-3.5 seconds
+            """
+        )
+
+# --- HEADER ---
+st.title("🛡️ Next-Gen Injection Attack & Deepfake Detection")
+st.caption("Autonomous multi-layered forensics: Client Attestation • CMOS Sensor PRNU • Optical Flow & Spectral Dynamics")
+
+# --- MAIN MODE SELECTION ---
+app_mode = st.segmented_control(
+    "Select Operating Mode:",
+    [
+        "Live Camera Stream",
+        "Pre-recorded Video Analysis",
+        "System & Attestation Inspector",
+    ],
+    default="Live Camera Stream",
+    label_visibility="collapsed",
+)
+
+st.divider()
+
+
+# =============================================================================
+# HELPER: FORMAT ATTESTATION ARGUMENT
+# =============================================================================
+def get_attestation_arg(selection: str):
+    if selection == "Real Live Host Probe":
+        return None
+    prefix = "Simulation: "
+    if selection.startswith(prefix):
+        raw = selection[len(prefix):]
+        # Map to known preset keys
+        mapping = {
+            "Clean Physical Device": "Clean Physical Device",
+            "Rooted Android (Magisk/SU)": "Compromised / Rooted Android (Magisk/SU)",
+            "Android Emulator (QEMU/Goldfish)": "Android Emulator (Goldfish/QEMU)",
+            "Virtual Camera Injection (OBS)": "Virtual Camera Injection (OBS / Hooked Driver)",
+        }
+        return mapping.get(raw, raw)
+    return selection
+
+
+# =============================================================================
+# HELPER: RENDER FORENSIC REPORT CARDS
+# =============================================================================
+def render_forensic_results(result: dict, video_path: str):
+    verdict = result.get("verdict", "UNKNOWN")
+    gate = result.get("gate")
+    details = result.get("details", {})
+
+    if verdict != "AUTHENTIC LIVE STREAM":
+        st.error(f"### :material/error: {verdict}")
+        trigger_reason = details.get("details", details.get("explanation", "Verification threshold violated."))
+        st.warning(f"**Forensic Trigger Reason:** {trigger_reason}")
+
+        if gate == 1:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Gate 1 Status", details.get("verdict", "BLOCK"), delta="Terminated Early", delta_color="inverse")
+            with c2:
+                st.metric("Attestation Latency", f"{details.get('latency_ms', 0.0):.2f} ms", delta="Sub-50ms Target", delta_color="normal")
+            with c3:
+                st.metric("Root / VM Flag", f"Root={details.get('root_detected', False)} | VM={details.get('emulator_detected', False)}")
+
+        elif gate == 2:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Gate 2 Status", "PRNU Mismatch", delta="Terminated at Gate 2", delta_color="inverse")
+            with c2:
+                st.metric("PRNU Anomaly Score", f"{details.get('score', 0.0):.3f}", delta="Flagged (≥ 0.55)", delta_color="inverse")
+            with c3:
+                st.metric("PCE Peak Energy", f"{details.get('pce_score', 0.0):.1f}", delta="Below Authentic Threshold (<45.0)", delta_color="inverse")
+
+        elif gate == 3:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Gate 3 Status", "Temporal Anomaly", delta="Terminated at Gate 3", delta_color="inverse")
+            with c2:
+                st.metric("Temporal Anomaly Score", f"{details.get('score', 0.0):.3f}", delta="Flagged (≥ 0.60)", delta_color="inverse")
+            with c3:
+                st.metric("Flicker Rate", f"{details.get('flicker_rate', 0.0):.3f}", delta="Elevated Synthesis Jitter", delta_color="inverse")
+
+    else:
+        st.success("### :material/check_circle: Verdict: AUTHENTIC LIVE STREAM")
+        st.caption("All verification gates passed. Hardware integrity, microscopic silicon PRNU, and temporal coherence confirmed.")
+
+        hw_data = details.get("attestation", {})
+        prnu_data = details.get("prnu", {})
+        temp_data = details.get("temporal", {})
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("Gate 1: Device", hw_data.get("verdict", "PASS"), delta=f"{hw_data.get('latency_ms', 0.0):.2f} ms")
+        with m2:
+            st.metric("Gate 2: PCE Energy", f"{prnu_data.get('pce_score', 0.0):.1f}", delta="Authentic (≥ 45.0)")
+        with m3:
+            st.metric("Gate 2: PRNU Anomaly", f"{prnu_data.get('score', 0.0):.3f}", delta="Clean (< 0.55)")
+        with m4:
+            st.metric("Gate 3: Temporal Score", f"{temp_data.get('score', 0.0):.3f}", delta="Clean (< 0.60)")
+
+        # Detailed breakdown in expander
+        with st.expander(":material/analytics: Comprehensive Forensic Metrics Breakdown", expanded=False):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.write("**Layer 2: Camera Sensor Noise (PRNU)**")
+                st.write(f"- **PCE Peak-to-Correlation Energy:** `{prnu_data.get('pce_score', 0.0):.2f}`")
+                st.write(f"- **Inter-frame Noise Persistence:** `{prnu_data.get('persistence', 0.0):.4f}`")
+                st.write(f"- **Composite PRNU Score:** `{prnu_data.get('score', 0.0):.4f}`")
+                st.write(f"- **Analysis Note:** {prnu_data.get('explanation', '')}")
+            with col_b:
+                st.write("**Layer 3: Temporal & Frequency Consistency**")
+                st.write(f"- **Flicker Rate:** `{temp_data.get('flicker_rate', 0.0):.4f}`")
+                st.write(f"- **Flow Incoherence:** `{temp_data.get('flow_incoherence', 0.0):.4f}`")
+                st.write(f"- **Spectral Periodicity Anomaly:** `{temp_data.get('periodicity_anomaly', 0.0):.4f}`")
+                st.write(f"- **Composite Temporal Score:** `{temp_data.get('score', 0.0):.4f}`")
+                st.write(f"- **Analysis Note:** {temp_data.get('explanation', '')}")
+
+    # Display Extracted Frame Buffer Gallery
+    frames = result.get("frames", [])
+    if not frames and os.path.exists(video_path):
+        frames = extract_frames(video_path, max_frames=32)
+
+    if frames:
+        st.write("---")
+        st.subheader(":material/collections: Extracted Frame Pipeline Buffer")
+        st.caption("Sampled frames inspected by the optical flow and spatial denoising residual extractors:")
+        f_cols = st.columns(4)
+        for idx, col in enumerate(f_cols):
+            sample_idx = min(idx * 7, len(frames) - 1)
+            col.image(frames[sample_idx], caption=f"Frame {sample_idx}", width="stretch")
+
+
+# =============================================================================
+# MODE 1: LIVE CAMERA STREAM
+# =============================================================================
+if app_mode == "Live Camera Stream":
+    st.subheader(":material/videocam: Real-Time Live Camera Stream Verification")
+    st.markdown(
+        "Captures a live frame sequence directly from your connected camera hardware, "
+        "streams it to the UI, and executes the 3 programmed verification tests in real time."
     )
-    st.info("Demonstrates early termination: compromised clients are blocked before running heavy video forensics.")
 
-uploaded_file = st.file_uploader("Upload incoming video stream (.mp4, .mov, .avi)", type=["mp4", "mov", "avi"])
+    # Enumerate live video devices
+    available_devices = host_integrity.enumerate_video_devices()
 
-if uploaded_file is not None:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tfile.write(uploaded_file.read())
-    video_path = tfile.name
-    tfile.close()
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.5, 1, 1])
 
-    col1, col2 = st.columns([1, 1.2], gap="large")
+    with ctrl_col1:
+        if available_devices:
+            dev_options = [f"{d['node']}: {d['name']}" for d in available_devices]
+            selected_dev_str = st.selectbox("Select Video Capture Device:", dev_options, index=0)
+            selected_cam_node = selected_dev_str.split(":")[0].strip()
+            # Extract device index number (e.g. /dev/video0 -> 0)
+            try:
+                selected_cam_idx = int(selected_cam_node.replace("/dev/video", ""))
+            except ValueError:
+                selected_cam_idx = 0
+        else:
+            st.warning("No `/dev/video*` devices detected in sysfs. Defaulting to camera index 0.")
+            selected_cam_idx = st.number_input("Camera Index:", min_value=0, max_value=4, value=0)
 
-    with col1:
-        st.subheader("📹 Input Stream Preview")
-        st.video(video_path)
+    with ctrl_col2:
+        capture_frames_target = st.selectbox(
+            "Live Frame Sequence Buffer:",
+            [45, 60, 90],
+            index=0,
+            format_func=lambda x: f"{x} frames (~{x // 30:.1f}s)",
+            help="Higher frame counts increase statistical confidence for PRNU cross-correlation.",
+        )
 
-    with col2:
-        st.subheader("🔍 Real-Time Gated Verification")
-        
-        if st.button("Run Forensic Verification", type="primary", use_container_width=True):
-            with st.status("Executing gated verification pipeline...", expanded=True) as status:
-                st.write(f"Gate 1: Querying client attestation ({attestation_state})...")
-                result = run_detection_pipeline(video_path, attestation_mode=attestation_state)
+    with ctrl_col3:
+        st.write("")
+        st.write("")
+        start_capture_btn = st.button(
+            "Start Live Capture & Verification",
+            type="primary",
+        )
 
-                if result["gate"] == 1:
-                    status.update(label="❌ Terminated at Gate 1 (Hardware/OS Level)", state="error")
-                elif result["verdict"] != "AUTHENTIC LIVE STREAM":
-                    status.update(label=f"❌ Terminated at Gate {result['gate']}", state="error")
-                else:
-                    st.write("✓ Hardware and OS integrity verified.")
-                    st.write("✓ Microscopic PRNU pattern validated.")
-                    st.write("✓ Optical flow stability and high-frequency spectral ratios verified.")
-                    status.update(label="✅ All Verification Gates Passed", state="complete")
+    live_container = st.container(border=True)
 
-            # --- DISPLAY FORENSIC VERDICT & METRICS OUTSIDE STATUS CONTAINER ---
-            st.divider()
+    with live_container:
+        viewfinder_col, preview_col = st.columns([1, 1], gap="medium")
 
-            if result["verdict"] != "AUTHENTIC LIVE STREAM":
-                st.error(f"### 🚨 {result['verdict']}")
-                st.warning(f"**Forensic Trigger Reason:** {result['details'].get('details', result['details'].get('explanation', 'Threshold exceeded.'))}")
-                
-                if result["gate"] == 1:
-                    m1, m2 = st.columns(2)
-                    with m1:
-                        st.metric("Device Integrity", result['details'].get('verdict', 'BLOCK'), delta="Session Terminated", delta_color="inverse")
-                    with m2:
-                        st.metric("Attestation Latency", f"{result['details'].get('latency_ms', 0.0):.1f} ms", delta="Sub-50ms Target", delta_color="normal")
-                elif result["gate"] == 2:
-                    m1, m2 = st.columns(2)
-                    with m1:
-                        st.metric("PRNU Anomaly Score", f"{result['details'].get('score', 0.0):.3f}", delta="Flagged (≥ 0.55)", delta_color="inverse")
-                    with m2:
-                        st.metric("PCE Peak Energy", f"{result['details'].get('pce_score', 0.0):.1f}", delta="Below Threshold", delta_color="inverse")
-                elif result["gate"] == 3:
-                    m1, m2 = st.columns(2)
-                    with m1:
-                        st.metric("Temporal Anomaly Score", f"{result['details'].get('score', 0.0):.3f}", delta="Flagged (≥ 0.60)", delta_color="inverse")
-                    with m2:
-                        st.metric("Flicker Rate", f"{result['details'].get('flicker_rate', 0.0):.2f}")
+        viewfinder_placeholder = viewfinder_col.empty()
+        status_placeholder = viewfinder_col.empty()
+        preview_placeholder = preview_col.empty()
+
+        # Handle Live Capture Execution
+        if start_capture_btn:
+            status_placeholder.info("Initializing camera device...")
+            cap = cv2.VideoCapture(selected_cam_idx)
+
+            if not cap.isOpened():
+                status_placeholder.error(
+                    f"Could not open camera device `{selected_cam_idx}`. "
+                    "Ensure no other application is locking the webcam, or try Pre-recorded Video Analysis."
+                )
             else:
-                st.success("### Verdict: AUTHENTIC LIVE STREAM")
+                captured_frames = []
+                progress_bar = viewfinder_col.progress(0, text="Capturing live camera buffer...")
 
-                hw_data = result["details"]["attestation"]
-                prnu_data = result["details"]["prnu"]
-                temp_data = result["details"]["temporal"]
+                actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
+                actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
 
-                m1, m2, m3, m4 = st.columns(4)
-                with m1:
-                    st.metric("Device Integrity", hw_data["verdict"], delta=f"{hw_data['latency_ms']} ms")
-                with m2:
-                    st.metric("PCE Peak Energy", f"{prnu_data['pce_score']:.1f}", delta="Gate 2")
-                with m3:
-                    st.metric("PRNU Anomaly", f"{prnu_data['score']:.3f}", delta="< 0.55")
-                with m4:
-                    st.metric("Temporal Anomaly", f"{temp_data['score']:.3f}", delta="< 0.60")
+                # Capture frames live
+                for i in range(capture_frames_target):
+                    ret, frame_bgr = cap.read()
+                    if not ret:
+                        break
+                    captured_frames.append(frame_bgr)
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    viewfinder_placeholder.image(
+                        frame_rgb,
+                        caption=f"Live Feed • Frame {i + 1}/{capture_frames_target} ({actual_w}x{actual_h})",
+                        width="stretch",
+                    )
+                    progress_bar.progress((i + 1) / capture_frames_target, text=f"Captured {i + 1}/{capture_frames_target} frames...")
+                    time.sleep(0.015)
 
-                if "frames" in result and result["frames"]:
-                    st.write("---")
-                    st.write("**Extracted Frame Pipeline Buffer:**")
-                    frames = result["frames"]
-                    f_cols = st.columns(4)
-                    for idx, col in enumerate(f_cols):
-                        sample_idx = min(idx * 7, len(frames) - 1)
-                        col.image(frames[sample_idx], caption=f"Frame {sample_idx}", use_container_width=True)
+                cap.release()
+                progress_bar.empty()
 
-    try:
-        os.remove(video_path)
-    except OSError:
-        pass
+                if len(captured_frames) < 15:
+                    status_placeholder.error("Captured insufficient frames from camera. Verification aborted.")
+                else:
+                    status_placeholder.success(f"Successfully captured {len(captured_frames)} live frames.")
+
+                    # Write captured frames to temporary MP4
+                    temp_live = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                    temp_live_path = temp_live.name
+                    temp_live.close()
+
+                    h, w, _ = captured_frames[0].shape
+                    writer = cv2.VideoWriter(temp_live_path, cv2.VideoWriter_fourcc(*"mp4v"), 30, (w, h))
+                    for f in captured_frames:
+                        writer.write(f)
+                    writer.release()
+
+                    st.session_state["live_clip_path"] = temp_live_path
+
+                    # Execute the 3 Programmed Tests
+                    attestation_arg = get_attestation_arg(attestation_source)
+
+                    with st.status("Executing 3-stage gated forensic pipeline on live capture...", expanded=True) as status:
+                        st.write("Gate 1: Probing live host environment & video device integrity...")
+                        res = run_detection_pipeline(
+                            temp_live_path,
+                            attestation_mode=attestation_arg,
+                            ref_fingerprint_path=active_ref_fp,
+                            fast_sample=False,
+                        )
+
+                        if res["gate"] == 1:
+                            status.update(label="❌ Terminated at Gate 1 (Host/Device Attestation Block)", state="error")
+                        elif res["gate"] == 2:
+                            status.update(label="❌ Terminated at Gate 2 (PRNU Sensor Noise Mismatch)", state="error")
+                        elif res["gate"] == 3:
+                            status.update(label="❌ Terminated at Gate 3 (Temporal Incoherence / Deepfake Detected)", state="error")
+                        else:
+                            st.write("✓ Hardware and OS environment verified clean.")
+                            st.write("✓ Microscopic PRNU noise fingerprint confirmed.")
+                            st.write("✓ Optical flow stability and high-frequency spectral continuity verified.")
+                            status.update(label="✅ All Verification Gates Passed: Authentic Live Stream", state="complete")
+
+                    st.session_state["live_result"] = res
+
+        # Display previous or newly captured live results
+        if st.session_state.get("live_clip_path") and os.path.exists(st.session_state["live_clip_path"]):
+            with preview_placeholder.container():
+                st.subheader(":material/play_circle: Captured Live Stream Preview")
+                st.video(st.session_state["live_clip_path"])
+
+    if st.session_state.get("live_result") and st.session_state.get("live_clip_path"):
+        st.divider()
+        st.subheader(":material/assignment: Live Forensic Verification Report")
+        render_forensic_results(st.session_state["live_result"], st.session_state["live_clip_path"])
+
+
+# =============================================================================
+# MODE 2: PRE-RECORDED VIDEO ANALYSIS
+# =============================================================================
+elif app_mode == "Pre-recorded Video Analysis":
+    st.subheader(":material/movie: Pre-recorded Video Stream Analysis")
+    st.markdown(
+        "Analyze pre-recorded, uploaded, or synthetic benchmark video streams "
+        "through the full 3-layer gated forensic verification pipeline."
+    )
+
+    source_type = st.segmented_control(
+        "Choose Video Source:",
+        ["Upload Video File", "Bundled Benchmark Simulations"],
+        default="Upload Video File",
+    )
+
+    video_to_analyze = None
+
+    if source_type == "Upload Video File":
+        uploaded_file = st.file_uploader(
+            "Upload video stream (.mp4, .mov, .avi, .mkv, .webm):",
+            type=["mp4", "mov", "avi", "mkv", "webm"],
+        )
+        if uploaded_file is not None:
+            tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tfile.write(uploaded_file.read())
+            video_to_analyze = tfile.name
+            tfile.close()
+
+    else:
+        sample_choice = st.radio(
+            "Select Benchmark Clip:",
+            [
+                "real_sim.mp4 — Genuine Physical Camera Simulation (CMOS PRNU + Smooth Motion)",
+                "fake_sim.mp4 — Synthetic Deepfake Injection Simulation (No PRNU + Temporal Jitter)",
+            ],
+            index=0,
+        )
+        selected_file = "real_sim.mp4" if "real_sim.mp4" in sample_choice else "fake_sim.mp4"
+        if os.path.exists(selected_file):
+            video_to_analyze = selected_file
+        else:
+            st.error(f"Sample file `{selected_file}` not found on disk. Run `python generate_test_videos.py` first.")
+
+    if video_to_analyze is not None:
+        col_preview, col_action = st.columns([1, 1], gap="large")
+
+        with col_preview:
+            st.subheader(":material/smart_display: Video Stream Preview")
+            st.video(video_to_analyze)
+
+            # Metadata inspection
+            cap_meta = cv2.VideoCapture(video_to_analyze)
+            if cap_meta.isOpened():
+                w_m = int(cap_meta.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h_m = int(cap_meta.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps_m = cap_meta.get(cv2.CAP_PROP_FPS) or 30.0
+                total_f = int(cap_meta.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                dur = total_f / fps_m if fps_m else 0.0
+                cap_meta.release()
+                st.caption(f"**Resolution:** {w_m}x{h_m} | **Frames:** {total_f} | **FPS:** {fps_m:.1f} | **Duration:** {dur:.2f}s")
+
+        with col_action:
+            st.subheader(":material/play_arrow: Gated Verification Execution")
+            st.markdown(
+                "Executes Gate 1 (Host Attestation), Gate 2 (PRNU Sensor Noise Profiling), "
+                "and Gate 3 (Temporal & Spectral Coherence) with early termination."
+            )
+
+            fast_sample_check = st.checkbox(
+                "Enable fast frame sampling (first 45 frames for sub-2s latency)",
+                value=True,
+                help="Recommended: preserves forensic accuracy while reducing processing time on long video clips.",
+            )
+
+            run_btn = st.button("Run Forensic Verification", type="primary")
+
+            if run_btn:
+                attestation_arg = get_attestation_arg(attestation_source)
+
+                with st.status("Executing gated verification pipeline...", expanded=True) as status:
+                    st.write(f"Gate 1: Evaluating client/host attestation ({attestation_source})...")
+                    res = run_detection_pipeline(
+                        video_to_analyze,
+                        attestation_mode=attestation_arg,
+                        ref_fingerprint_path=active_ref_fp,
+                        fast_sample=fast_sample_check,
+                    )
+
+                    if res["gate"] == 1:
+                        status.update(label="❌ Terminated at Gate 1 (Hardware/OS Level Block)", state="error")
+                    elif res["gate"] == 2:
+                        status.update(label="❌ Terminated at Gate 2 (PRNU Sensor Noise Mismatch)", state="error")
+                    elif res["gate"] == 3:
+                        status.update(label="❌ Terminated at Gate 3 (Temporal Coherence Anomaly)", state="error")
+                    else:
+                        st.write("✓ Hardware and OS integrity verified.")
+                        st.write("✓ Microscopic PRNU noise fingerprint confirmed.")
+                        st.write("✓ Optical flow stability and high-frequency spectral ratios verified.")
+                        status.update(label="✅ All Verification Gates Passed", state="complete")
+
+                st.session_state["prerecorded_result"] = res
+
+        if st.session_state.get("prerecorded_result"):
+            st.divider()
+            st.subheader(":material/assignment: Forensic Verification Report")
+            render_forensic_results(st.session_state["prerecorded_result"], video_to_analyze)
+
+
+# =============================================================================
+# MODE 3: SYSTEM & ATTESTATION INSPECTOR
+# =============================================================================
+elif app_mode == "System & Attestation Inspector":
+    st.subheader(":material/security: Real-Time Host & Video Hardware Integrity Audit")
+    st.markdown(
+        "Performs live, un-mocked diagnostic probing of your host operating system, "
+        "video device drivers, hypervisor markers, and execution privileges."
+    )
+
+    t_probe_start = time.perf_counter()
+    live_host_data = host_integrity.probe_host_integrity()
+    probe_latency = (time.perf_counter() - t_probe_start) * 1000.0
+
+    top_m1, top_m2, top_m3, top_m4 = st.columns(4)
+    with top_m1:
+        st.metric(
+            "Overall Host Verdict",
+            live_host_data["verdict"],
+            delta="Session Trusted" if live_host_data["passed"] else "Untrusted",
+        )
+    with top_m2:
+        st.metric(
+            "Measured Probe Latency",
+            f"{live_host_data['latency_ms']:.2f} ms",
+            delta="Sub-1ms Target",
+        )
+    with top_m3:
+        st.metric(
+            "Hypervisor / VM",
+            "Detected" if live_host_data["emulator_detected"] else "Bare Metal",
+            delta="Clean" if not live_host_data["emulator_detected"] else "Risk Flag",
+            delta_color="normal" if not live_host_data["emulator_detected"] else "inverse",
+        )
+    with top_m4:
+        st.metric(
+            "Virtual Camera Drivers",
+            "Detected" if live_host_data["virtual_camera_detected"] else "None Detected",
+            delta="Physical Camera" if not live_host_data["virtual_camera_detected"] else "Injection Risk",
+            delta_color="normal" if not live_host_data["virtual_camera_detected"] else "inverse",
+        )
+
+    st.write("---")
+
+    card1, card2 = st.columns(2, gap="large")
+
+    with card1:
+        with st.container(border=True):
+            st.subheader(":material/videocam: Enumerated Video Capture Devices")
+            devices = live_host_data.get("devices", [])
+            if devices:
+                for idx, d in enumerate(devices):
+                    icon = ":material/videocam_off:" if d["is_virtual"] else ":material/videocam:"
+                    v_badge = "**[VIRTUAL LOOPBACK]**" if d["is_virtual"] else "**[PHYSICAL UVC]**"
+                    st.markdown(f"{icon} `{d['node']}` — **{d['name']}** {v_badge}")
+            else:
+                st.info("No video devices discovered in `/sys/class/video4linux`.")
+
+    with card2:
+        with st.container(border=True):
+            st.subheader(":material/terminal: Host Privileges & Hypervisor Diagnostics")
+            vm_info = live_host_data.get("vm_info", {})
+            priv = live_host_data.get("privileges", {})
+
+            st.write(f"- **System Platform / DMI:** `{vm_info.get('vendor', 'Unknown')}`")
+            st.write(f"- **Containerized Environment:** `{vm_info.get('is_container', False)}`")
+            st.write(f"- **Process Effective UID:** `{priv.get('uid', 'N/A')}` (`is_root={priv.get('is_root', False)}`)")
+            st.write(f"- **SU Binary Presence:** `{priv.get('su_present', False)}`")
+
+    st.write("---")
+    st.subheader(":material/phone_android: Mobile Client Attestation Payload Tester")
+    st.caption("Paste JSON payload generated by Aarya's Android Attestation SDK (`DetectionResult.kt`):")
+
+    sample_client_json = (
+        '{\n  "isRooted": false,\n  "isEmulator": false,\n  "isVirtualCamera": false,\n'
+        '  "riskScore": 0.05,\n  "details": "Client hardware verified clean via Android Attestation SDK."\n}'
+    )
+    user_json = st.text_area("Client Attestation JSON Payload:", value=sample_client_json, height=120)
+
+    if st.button("Evaluate Client Attestation Payload"):
+        client_eval = host_integrity.evaluate_client_attestation(user_json)
+        st.json(client_eval)
+        if client_eval["blocked"]:
+            st.error(f"Gate 1 Verdict: BLOCK — {client_eval['details']}")
+        elif client_eval["virtual_camera_detected"]:
+            st.warning(f"Gate 1 Verdict: FLAG FOR REVIEW — {client_eval['details']}")
+        else:
+            st.success(f"Gate 1 Verdict: PASS — {client_eval['details']}")

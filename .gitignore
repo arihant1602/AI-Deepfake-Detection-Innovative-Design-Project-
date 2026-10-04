@@ -9,6 +9,11 @@ venv/
 env/
 ENV/
 
+# Agent / IDE configurations
+.agents/
+.claude/
+.gemini/
+
 # Testing & coverage
 .pytest_cache/
 .coverage
