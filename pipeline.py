@@ -233,3 +233,42 @@ def run_detection_pipeline(video_path, attestation_mode="Clean Physical Device")
         "frames": frames,
         "details": {"attestation": hw, "prnu": prnu, "temporal": temporal}
     }
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="End-to-End Gated Deepfake & Injection Attack Detection Pipeline")
+    parser.add_argument("--video", required=True, help="Path to input video stream (.mp4, .mov, .avi)")
+    parser.add_argument(
+        "--attestation-mode",
+        default="Clean Physical Device",
+        choices=[
+            "Clean Physical Device",
+            "Compromised / Rooted Android (Magisk/SU)",
+            "Android Emulator (Goldfish/QEMU)",
+            "Virtual Camera Injection (OBS / Hooked Driver)",
+        ],
+        help="Simulated client device attestation state",
+    )
+    parser.add_argument("--output", help="Optional path to write JSON forensic report")
+    args = parser.parse_args()
+
+    print(f"Running gated forensic pipeline on: {args.video} (Attestation: {args.attestation_mode})")
+    result = run_detection_pipeline(args.video, attestation_mode=args.attestation_mode)
+
+    # Prepare serializable result (omit raw frame arrays)
+    report = {
+        "verdict": result["verdict"],
+        "gate": result["gate"],
+        "details": result["details"],
+    }
+
+    report_json = json.dumps(report, indent=2)
+    print(report_json)
+
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(report_json)
+        print(f"Wrote forensic report to: {args.output}")
