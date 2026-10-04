@@ -460,10 +460,12 @@ class CameraSensorNoiseProfiler:
         valid_ratio = frames_with_face / max(1, min(total_frames, self.cfg["window_frames"]))
         confidence = float(np.clip(min(1.0, total_frames / 15.0) * (0.5 + 0.5 * valid_ratio), 0.1, 1.0))
 
+        static_noise_detected = bool((not result.flagged) and (pce_score >= 35.0))
         result.score = round(score, 4)
         result.flagged = score >= self.cfg["score_flag_thresh"]
         result.confidence = round(confidence, 2)
         result.components = {
+            "static_noise_detected": static_noise_detected,
             "inter_frame_persistence": round(inter_frame_persistence, 4),
             "persistence_anomaly": round(persistence_anomaly, 4),
             "pce_score": round(pce_score, 2),
@@ -488,11 +490,10 @@ class CameraSensorNoiseProfiler:
         if c["noise_floor_adequacy"] < 0.6:
             reasons.append("unnatural facial noise suppression characteristic of generative synthesis")
 
-        if not reasons:
-            return "Authentic CMOS sensor PRNU fingerprint confirmed across video frames."
+        if not r.flagged:
+            return f"Static CMOS sensor noise pattern confirmed across video frames (PCE={c['pce_score']:.1f}, persistence={c['inter_frame_persistence']:.4f})."
 
-        verdict = "flagged as likely synthetic / injected deepfake" if r.flagged else "minor sensor noise irregularities detected"
-        return f"Clip {verdict}: " + "; ".join(reasons) + "."
+        return f"Clip flagged as synthetic / injected deepfake (no static sensor noise detected): " + "; ".join(reasons) + "."
 
 
 # --------------------------------------------------------------------------- #

@@ -106,12 +106,14 @@ def check_hardware_attestation(attestation_input: Optional[Union[str, Dict[str, 
 # Gate 2: Camera Sensor Noise Profiling (Arihant's Layer 2 Module)
 def check_sensor_noise(video_path: str, ref_fingerprint_path: Optional[str] = None) -> Dict[str, Any]:
     """
-    Executes Photo-Response Non-Uniformity (PRNU) noise residual extraction,
-    2D circular cross-correlation, PCE, and inter-frame persistence analysis.
+    Executes Photo-Response Non-Uniformity (PRNU) noise analysis to detect
+    whether a stationary, static physical sensor noise pattern exists across frames.
+    Distinguishes genuine CMOS cameras from synthetic/injected streams without requiring pre-enrolled matching.
     """
     if not HAS_LAYER_2 or prnu_profiler is None:
         return {
             "passed": False,
+            "static_noise_detected": False,
             "score": 1.0,
             "pce_score": 0.0,
             "persistence": 0.0,
@@ -123,6 +125,7 @@ def check_sensor_noise(video_path: str, ref_fingerprint_path: Optional[str] = No
     except Exception as e:
         return {
             "passed": False,
+            "static_noise_detected": False,
             "score": 1.0,
             "pce_score": 0.0,
             "persistence": 0.0,
@@ -137,12 +140,15 @@ def check_sensor_noise(video_path: str, ref_fingerprint_path: Optional[str] = No
     if isinstance(components, dict):
         pce = components.get("pce_score", 0.0)
         persistence = components.get("inter_frame_persistence", 0.0)
+        static_noise_detected = components.get("static_noise_detected", not flagged)
     else:
         pce = getattr(components, "pce_score", 0.0)
         persistence = getattr(components, "inter_frame_persistence", 0.0)
+        static_noise_detected = getattr(components, "static_noise_detected", not flagged)
 
     return {
         "passed": not flagged,
+        "static_noise_detected": static_noise_detected,
         "score": score,
         "pce_score": pce,
         "persistence": persistence,

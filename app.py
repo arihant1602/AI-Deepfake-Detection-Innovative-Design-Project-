@@ -62,20 +62,12 @@ with st.sidebar:
         )
 
     with st.container(border=True):
-        st.subheader(":material/fingerprint: Reference PRNU Profile")
-        ref_fp_file = "camera_fingerprint.npy"
-        has_ref_fp = os.path.exists(ref_fp_file)
-        use_ref_fp = st.checkbox(
-            "Cross-correlate against enrolled camera fingerprint",
-            value=has_ref_fp,
-            disabled=not has_ref_fp,
-            help="When enabled, tests incoming frames against camera_fingerprint.npy enrolled during device registration.",
+        st.subheader(":material/sensors: Gate 2: PRNU Detection Mode")
+        st.caption(
+            "**Autonomous Static Noise Detection:** Evaluates whether a persistent, stationary "
+            "spatial noise field exists across the sensor grid (confirming a physical CMOS camera) "
+            "without requiring any pre-enrolled camera fingerprint."
         )
-        active_ref_fp = ref_fp_file if use_ref_fp and has_ref_fp else None
-        if active_ref_fp:
-            st.caption(f":material/check_circle: Using reference: `{ref_fp_file}`")
-        else:
-            st.caption(":material/info: Autonomous blind consistency mode (no reference).")
 
     with st.container(border=True):
         st.subheader(":material/info: Verification Thresholds")
@@ -152,11 +144,11 @@ def render_forensic_results(result: dict, video_path: str):
         elif gate == 2:
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.metric("Gate 2 Status", "PRNU Mismatch", delta="Terminated at Gate 2", delta_color="inverse")
+                st.metric("Gate 2: Static Noise", "ABSENT", delta="Synthetic Stream Detected", delta_color="inverse")
             with c2:
                 st.metric("PRNU Anomaly Score", f"{details.get('score', 0.0):.3f}", delta="Flagged (≥ 0.55)", delta_color="inverse")
             with c3:
-                st.metric("PCE Peak Energy", f"{details.get('pce_score', 0.0):.1f}", delta="Below Authentic Threshold (<45.0)", delta_color="inverse")
+                st.metric("Internal Static PCE", f"{details.get('pce_score', 0.0):.1f}", delta="Below Authentic Threshold (<45.0)", delta_color="inverse")
 
         elif gate == 3:
             c1, c2, c3 = st.columns(3)
@@ -169,7 +161,7 @@ def render_forensic_results(result: dict, video_path: str):
 
     else:
         st.success("### :material/check_circle: Verdict: AUTHENTIC LIVE STREAM")
-        st.caption("All verification gates passed. Hardware integrity, microscopic silicon PRNU, and temporal coherence confirmed.")
+        st.caption("All verification gates passed. Hardware integrity, static CMOS silicon PRNU noise, and temporal coherence confirmed.")
 
         hw_data = details.get("attestation", {})
         prnu_data = details.get("prnu", {})
@@ -179,9 +171,9 @@ def render_forensic_results(result: dict, video_path: str):
         with m1:
             st.metric("Gate 1: Device", hw_data.get("verdict", "PASS"), delta=f"{hw_data.get('latency_ms', 0.0):.2f} ms")
         with m2:
-            st.metric("Gate 2: PCE Energy", f"{prnu_data.get('pce_score', 0.0):.1f}", delta="Authentic (≥ 45.0)")
+            st.metric("Gate 2: Static Noise", "DETECTED", delta="Physical Sensor Verified")
         with m3:
-            st.metric("Gate 2: PRNU Anomaly", f"{prnu_data.get('score', 0.0):.3f}", delta="Clean (< 0.55)")
+            st.metric("Gate 2: Static PCE", f"{prnu_data.get('pce_score', 0.0):.1f}", delta="≥ 45.0 Authentic")
         with m4:
             st.metric("Gate 3: Temporal Score", f"{temp_data.get('score', 0.0):.3f}", delta="Clean (< 0.60)")
 
@@ -189,10 +181,11 @@ def render_forensic_results(result: dict, video_path: str):
         with st.expander(":material/analytics: Comprehensive Forensic Metrics Breakdown", expanded=False):
             col_a, col_b = st.columns(2)
             with col_a:
-                st.write("**Layer 2: Camera Sensor Noise (PRNU)**")
-                st.write(f"- **PCE Peak-to-Correlation Energy:** `{prnu_data.get('pce_score', 0.0):.2f}`")
+                st.write("**Layer 2: Static Sensor Noise (PRNU) Detection**")
+                st.write(f"- **Static Sensor Noise Exists:** `{'YES' if prnu_data.get('passed', False) else 'NO'}`")
+                st.write(f"- **Internal Static PCE Energy:** `{prnu_data.get('pce_score', 0.0):.2f}` (Threshold: ≥ 45.0)")
                 st.write(f"- **Inter-frame Noise Persistence:** `{prnu_data.get('persistence', 0.0):.4f}`")
-                st.write(f"- **Composite PRNU Score:** `{prnu_data.get('score', 0.0):.4f}`")
+                st.write(f"- **Composite PRNU Anomaly Score:** `{prnu_data.get('score', 0.0):.4f}`")
                 st.write(f"- **Analysis Note:** {prnu_data.get('explanation', '')}")
             with col_b:
                 st.write("**Layer 3: Temporal & Frequency Consistency**")
@@ -333,19 +326,19 @@ if app_mode == "Live Camera Stream":
                         res = run_detection_pipeline(
                             temp_live_path,
                             attestation_mode=attestation_arg,
-                            ref_fingerprint_path=active_ref_fp,
+                            ref_fingerprint_path=None,
                             fast_sample=False,
                         )
 
                         if res["gate"] == 1:
                             status.update(label="❌ Terminated at Gate 1 (Host/Device Attestation Block)", state="error")
                         elif res["gate"] == 2:
-                            status.update(label="❌ Terminated at Gate 2 (PRNU Sensor Noise Mismatch)", state="error")
+                            status.update(label="❌ Terminated at Gate 2 (No Static Sensor Noise / Synthetic Video)", state="error")
                         elif res["gate"] == 3:
                             status.update(label="❌ Terminated at Gate 3 (Temporal Incoherence / Deepfake Detected)", state="error")
                         else:
                             st.write("✓ Hardware and OS environment verified clean.")
-                            st.write("✓ Microscopic PRNU noise fingerprint confirmed.")
+                            st.write("✓ Stationary CMOS sensor noise pattern detected (physical camera verified).")
                             st.write("✓ Optical flow stability and high-frequency spectral continuity verified.")
                             status.update(label="✅ All Verification Gates Passed: Authentic Live Stream", state="complete")
 
@@ -448,19 +441,19 @@ elif app_mode == "Pre-recorded Video Analysis":
                     res = run_detection_pipeline(
                         video_to_analyze,
                         attestation_mode=attestation_arg,
-                        ref_fingerprint_path=active_ref_fp,
+                        ref_fingerprint_path=None,
                         fast_sample=fast_sample_check,
                     )
 
                     if res["gate"] == 1:
                         status.update(label="❌ Terminated at Gate 1 (Hardware/OS Level Block)", state="error")
                     elif res["gate"] == 2:
-                        status.update(label="❌ Terminated at Gate 2 (PRNU Sensor Noise Mismatch)", state="error")
+                        status.update(label="❌ Terminated at Gate 2 (No Static Sensor Noise / Synthetic Video)", state="error")
                     elif res["gate"] == 3:
                         status.update(label="❌ Terminated at Gate 3 (Temporal Coherence Anomaly)", state="error")
                     else:
                         st.write("✓ Hardware and OS integrity verified.")
-                        st.write("✓ Microscopic PRNU noise fingerprint confirmed.")
+                        st.write("✓ Stationary CMOS sensor noise pattern detected (physical camera verified).")
                         st.write("✓ Optical flow stability and high-frequency spectral ratios verified.")
                         status.update(label="✅ All Verification Gates Passed", state="complete")
 
