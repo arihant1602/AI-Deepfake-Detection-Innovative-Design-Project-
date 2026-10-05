@@ -42,6 +42,22 @@ class TestHardwareAttestationGate(unittest.TestCase):
         self.assertTrue(hw["virtual_camera_detected"])
         self.assertEqual(hw["verdict"], "FLAG_FOR_REVIEW")
 
+    def test_live_hardware_probe(self):
+        hw = check_hardware_attestation(attestation_input="live")
+        self.assertIn(hw["verdict"], ("PASS", "FLAG_FOR_REVIEW", "BLOCK"))
+        self.assertIn("diagnostics_summary", hw)
+        self.assertIsInstance(hw["diagnostics_summary"], list)
+        self.assertGreaterEqual(len(hw["diagnostics_summary"]), 4)
+        self.assertIn("hardware_telemetry", hw)
+        self.assertIn("camera_audit", hw)
+        self.assertIn("anti_tampering", hw)
+        self.assertLess(hw["latency_ms"], 500.0)
+
+    def test_live_hardware_probe_target_camera(self):
+        hw = check_hardware_attestation(attestation_input="live", camera_node="/dev/video0")
+        self.assertIn(hw["verdict"], ("PASS", "FLAG_FOR_REVIEW", "BLOCK"))
+        self.assertEqual(hw["camera_audit"]["target_node"], "/dev/video0")
+
 
 class TestPipelineFastSamplingAndFrameExtraction(unittest.TestCase):
     def setUp(self):

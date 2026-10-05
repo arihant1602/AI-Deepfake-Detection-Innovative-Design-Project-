@@ -94,6 +94,7 @@ def extract_frames(video_path: str, max_frames: int = 60) -> List[Any]:
 def check_hardware_attestation(
     attestation_input: Optional[Union[str, Dict[str, Any]]] = None,
     video_path: Optional[str] = None,
+    camera_node: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Evaluates hardware and OS integrity per CEN/TS 18099 Gate 1:
@@ -118,7 +119,7 @@ def check_hardware_attestation(
         }
 
     if attestation_input is None or attestation_input in ("live", "live_host", "Real-Time Live Host Probe"):
-        return host_integrity.probe_host_integrity()
+        return host_integrity.probe_host_integrity(target_camera_node=camera_node)
     return host_integrity.evaluate_client_attestation(attestation_input)
 
 
@@ -243,6 +244,7 @@ def run_detection_pipeline(
     ref_fingerprint_path: Optional[str] = None,
     fast_sample: bool = True,
     max_sample_frames: int = 45,
+    camera_node: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Executes the CEN/TS 18099 Gated Detection Pipeline:
@@ -252,7 +254,7 @@ def run_detection_pipeline(
       4. Complete verification verdict & frame buffer extraction
     """
     # Gate 1: Hardware / Environment Attestation
-    hw = check_hardware_attestation(attestation_mode, video_path=video_path)
+    hw = check_hardware_attestation(attestation_mode, video_path=video_path, camera_node=camera_node)
     if hw["blocked"]:
         return {
             "verdict": "DIGITAL INJECTION DETECTED (ENVIRONMENT COMPROMISED)",

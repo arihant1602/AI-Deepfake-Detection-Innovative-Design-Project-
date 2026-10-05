@@ -46,19 +46,38 @@ with st.sidebar:
     st.header(":material/tune: Forensic Pipeline Config")
     st.caption("CEN/TS 18099 Gated Verification Engine")
 
+    # Real-Time Host Hardware Attestation Summary Card
     with st.container(border=True):
-        st.subheader(":material/memory: Gate 1 Attestation Source")
-        attestation_source = st.radio(
-            "Attestation Source:",
+        st.subheader(":material/memory: Gate 1: Live Hardware Telemetry")
+        hw_quick = host_integrity.probe_host_integrity()
+        plat = hw_quick.get("hardware_telemetry", {})
+        cam = hw_quick.get("camera_audit", {})
+        tamper = hw_quick.get("anti_tampering", {})
+
+        status_color = "🟢" if hw_quick["passed"] else "🔴"
+        st.markdown(f"**Host Status:** {status_color} `{hw_quick['verdict']}` ({hw_quick['latency_ms']:.1f}ms)")
+        st.markdown(f"- **Platform:** `{plat.get('vendor', 'Unknown')} {plat.get('product', '')}`")
+        st.markdown(f"- **CPU:** `{plat.get('cpu_model', 'Unknown')}`")
+        st.markdown(f"- **Camera:** `{cam.get('primary_driver', 'N/A')}` on `{cam.get('primary_bus', 'N/A')}`")
+        if plat.get("battery_detected"):
+            st.markdown(f"- **Power:** `{plat.get('battery_summary', 'N/A')}`")
+        if plat.get("thermal_temp_c") is not None:
+            st.markdown(f"- **Thermal:** `{plat.get('thermal_temp_c')}°C` (Silicon Diode)")
+        st.markdown(f"- **Anti-Tamper:** `TracerPid: {tamper.get('tracer_pid', 0)}` • `LD_PRELOAD: {'Clean' if not tamper.get('is_injected') else 'Injected'}`")
+
+    # Optional Simulation Test Vectors expander (for developer demo / regression testing)
+    with st.expander(":material/science: Attack Simulation Vectors (Optional Demo)", expanded=False):
+        st.caption("Override live hardware checks with synthetic attack vectors to demonstrate CEN/TS 18099 early-termination:")
+        sim_vector = st.selectbox(
+            "Simulate Attack Vector:",
             [
-                "Auto (Live Probe for Camera / Provenance for File Upload)",
-                "Simulation: Clean Physical Device",
-                "Simulation: Rooted Android (Magisk/SU)",
-                "Simulation: Android Emulator (QEMU/Goldfish)",
-                "Simulation: Virtual Camera Injection (OBS)",
+                "None (Use Live Hardware Telemetry)",
+                "Compromised / Rooted Android (Magisk/SU)",
+                "Android Emulator (Goldfish/QEMU)",
+                "Virtual Camera Injection (OBS / Hooked Driver)",
             ],
             index=0,
-            help="In Auto mode: probes live hardware for webcam capture, or analyzes container provenance for file uploads. Simulation options demonstrate early termination for specific attack scenarios.",
+            help="When set to 'None', Gate 1 actively interrogates physical laptop hardware and video drivers.",
         )
 
     with st.container(border=True):
@@ -73,7 +92,7 @@ with st.sidebar:
         st.subheader(":material/info: Verification Thresholds")
         st.markdown(
             """
-            - **Gate 1 (Device):** Root / VM = `BLOCK`
+            - **Gate 1 (Device):** Root / VM / Hook = `BLOCK`
             - **Gate 2 (PRNU):** PCE Peak > 45.0, Anomaly < 0.55
             - **Gate 3 (Temporal):** Flicker < 0.65, Anomaly < 0.60
             - **Target Latency:** Sub-3.5 seconds
@@ -102,21 +121,10 @@ st.divider()
 # =============================================================================
 # HELPER: FORMAT ATTESTATION ARGUMENT
 # =============================================================================
-def get_attestation_arg(selection: str, is_live: bool = False):
-    if "Auto" in selection:
+def get_attestation_arg(sim_choice: str, is_live: bool = False):
+    if sim_choice == "None (Use Live Hardware Telemetry)":
         return "live" if is_live else "file_upload"
-    prefix = "Simulation: "
-    if selection.startswith(prefix):
-        raw = selection[len(prefix):]
-        # Map to known preset keys
-        mapping = {
-            "Clean Physical Device": "Clean Physical Device",
-            "Rooted Android (Magisk/SU)": "Compromised / Rooted Android (Magisk/SU)",
-            "Android Emulator (QEMU/Goldfish)": "Android Emulator (Goldfish/QEMU)",
-            "Virtual Camera Injection (OBS)": "Virtual Camera Injection (OBS / Hooked Driver)",
-        }
-        return mapping.get(raw, raw)
-    return selection
+    return sim_choice
 
 
 # =============================================================================
@@ -139,7 +147,16 @@ def render_forensic_results(result: dict, video_path: str):
             with c2:
                 st.metric("Attestation Latency", f"{details.get('latency_ms', 0.0):.2f} ms", delta="Sub-50ms Target", delta_color="normal")
             with c3:
-                st.metric("Root / VM Flag", f"Root={details.get('root_detected', False)} | VM={details.get('emulator_detected', False)}")
+                st.metric("Trigger Cause", "Host Untrusted / Intercepted" if details.get("blocked") else "Virtual Loopback Detected")
+
+            # Render granular diagnostics table if available
+            diag_list = details.get("diagnostics_summary", [])
+            if diag_list:
+                st.write("---")
+                st.subheader(":material/fact_check: Hardware Diagnostics Audit Checklist")
+                for d in diag_list:
+                    icon = "✅" if d["status"] == "PASS" else ("⚠️" if d["status"] == "WARN" else "❌")
+                    st.markdown(f"- {icon} **{d['name']}**: `{d['value']}` — *{d['details']}*")
 
         elif gate == 2:
             c1, c2, c3 = st.columns(3)
@@ -182,17 +199,43 @@ def render_forensic_results(result: dict, video_path: str):
             st.metric("Gate 3: Temporal Score", f"{temp_data.get('score', 0.0):.3f}", delta="Clean (< 0.60)")
 
         # Detailed breakdown in expander
-        with st.expander(":material/analytics: Comprehensive Forensic Metrics Breakdown", expanded=False):
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.write("**Layer 2: Static Sensor Noise (PRNU) Detection**")
+        with st.expander(":material/analytics: Comprehensive Forensic Metrics Breakdown", expanded=True):
+            col_hw, col_prnu, col_temp = st.columns(3)
+            with col_hw:
+                st.write("**Gate 1: Hardware & Host Attestation**")
+                st.write(f"- **Verdict:** `{hw_data.get('verdict', 'PASS')}`")
+                st.write(f"- **Attestation Latency:** `{hw_data.get('latency_ms', 0.0):.2f} ms`")
+                plat_info = hw_data.get("hardware_telemetry", {})
+                cam_info = hw_data.get("camera_audit", {})
+                tamper_info = hw_data.get("anti_tampering", {})
+                if plat_info:
+                    st.write(f"- **Platform:** `{plat_info.get('vendor')} {plat_info.get('product')}`")
+                    st.write(f"- **CPU:** `{plat_info.get('cpu_model')}`")
+                    if plat_info.get("battery_detected"):
+                        st.write(f"- **Battery:** `{plat_info.get('battery_summary')}`")
+                    if plat_info.get("thermal_temp_c") is not None:
+                        st.write(f"- **Thermal Diode:** `{plat_info.get('thermal_temp_c')}°C`")
+                if cam_info:
+                    st.write(f"- **Camera:** `{cam_info.get('primary_card')} ({cam_info.get('primary_driver')} on {cam_info.get('primary_bus')})`")
+                if tamper_info:
+                    st.write(f"- **Anti-Tamper:** `TracerPid={tamper_info.get('tracer_pid', 0)}`, `LD_PRELOAD={'Clean' if not tamper_info.get('is_injected') else 'Injected'}`")
+
+                diag_items = hw_data.get("diagnostics_summary", [])
+                if diag_items:
+                    st.write("**Hardware Check Results:**")
+                    for d in diag_items:
+                        st.write(f"  ✓ {d['name']}: `{d['value']}`")
+
+            with col_prnu:
+                st.write("**Gate 2: Static Sensor Noise (PRNU)**")
                 st.write(f"- **Static Sensor Noise Exists:** `{'YES' if prnu_data.get('passed', False) else 'NO'}`")
                 st.write(f"- **Internal Static PCE Energy:** `{prnu_data.get('pce_score', 0.0):.2f}` (Threshold: ≥ 45.0)")
                 st.write(f"- **Inter-frame Noise Persistence:** `{prnu_data.get('persistence', 0.0):.4f}`")
                 st.write(f"- **Composite PRNU Anomaly Score:** `{prnu_data.get('score', 0.0):.4f}`")
                 st.write(f"- **Analysis Note:** {prnu_data.get('explanation', '')}")
-            with col_b:
-                st.write("**Layer 3: Temporal & Frequency Consistency**")
+
+            with col_temp:
+                st.write("**Gate 3: Temporal & Frequency Consistency**")
                 st.write(f"- **Flicker Rate:** `{temp_data.get('flicker_rate', 0.0):.4f}`")
                 st.write(f"- **Flow Incoherence:** `{temp_data.get('flow_incoherence', 0.0):.4f}`")
                 st.write(f"- **Spectral Periodicity Anomaly:** `{temp_data.get('periodicity_anomaly', 0.0):.4f}`")
@@ -231,7 +274,10 @@ if app_mode == "Live Camera Stream":
 
     with ctrl_col1:
         if available_devices:
-            dev_options = [f"{d['node']}: {d['name']}" for d in available_devices]
+            dev_options = [
+                f"{d['node']}: {d['name']} ({d['driver']} on {d['bus_info']})"
+                for d in available_devices
+            ]
             selected_dev_str = st.selectbox("Select Video Capture Device:", dev_options, index=0)
             selected_cam_node = selected_dev_str.split(":")[0].strip()
             # Extract device index number (e.g. /dev/video0 -> 0)
@@ -242,6 +288,7 @@ if app_mode == "Live Camera Stream":
         else:
             st.warning("No `/dev/video*` devices detected in sysfs. Defaulting to camera index 0.")
             selected_cam_idx = st.number_input("Camera Index:", min_value=0, max_value=4, value=0)
+            selected_cam_node = f"/dev/video{selected_cam_idx}"
 
     with ctrl_col2:
         capture_frames_target = st.selectbox(
@@ -323,15 +370,16 @@ if app_mode == "Live Camera Stream":
                     st.session_state["live_clip_path"] = temp_live_path
 
                     # Execute the 3 Programmed Tests
-                    attestation_arg = get_attestation_arg(attestation_source, is_live=True)
+                    attestation_arg = get_attestation_arg(sim_vector, is_live=True)
 
                     with st.status("Executing 3-stage gated forensic pipeline on live capture...", expanded=True) as status:
-                        st.write("Gate 1: Probing live host environment & video device integrity...")
+                        st.write(f"Gate 1: Interrogating hardware at {selected_cam_node} & host execution environment...")
                         res = run_detection_pipeline(
                             temp_live_path,
                             attestation_mode=attestation_arg,
                             ref_fingerprint_path=None,
                             fast_sample=False,
+                            camera_node=selected_cam_node,
                         )
 
                         if res["gate"] == 1:
@@ -341,7 +389,7 @@ if app_mode == "Live Camera Stream":
                         elif res["gate"] == 3:
                             status.update(label="❌ Terminated at Gate 3 (Temporal Incoherence / Deepfake Detected)", state="error")
                         else:
-                            st.write("✓ Hardware and OS environment verified clean.")
+                            st.write("✓ Hardware and OS environment verified clean on bare metal.")
                             st.write("✓ Stationary CMOS sensor noise pattern detected (physical camera verified).")
                             st.write("✓ Optical flow stability and high-frequency spectral continuity verified.")
                             status.update(label="✅ All Verification Gates Passed: Authentic Live Stream", state="complete")
@@ -425,7 +473,7 @@ elif app_mode == "Pre-recorded Video Analysis":
         with col_action:
             st.subheader(":material/play_arrow: Gated Verification Execution")
             st.markdown(
-                "Executes Gate 1 (Host Attestation), Gate 2 (PRNU Sensor Noise Profiling), "
+                "Executes Gate 1 (Host Attestation / Provenance), Gate 2 (PRNU Sensor Noise Profiling), "
                 "and Gate 3 (Temporal & Spectral Coherence) with early termination."
             )
 
@@ -438,10 +486,10 @@ elif app_mode == "Pre-recorded Video Analysis":
             run_btn = st.button("Run Forensic Verification", type="primary")
 
             if run_btn:
-                attestation_arg = get_attestation_arg(attestation_source, is_live=False)
+                attestation_arg = get_attestation_arg(sim_vector, is_live=False)
 
                 with st.status("Executing gated verification pipeline...", expanded=True) as status:
-                    st.write(f"Gate 1: Evaluating client/host attestation ({attestation_source})...")
+                    st.write(f"Gate 1: Evaluating client/host attestation ({sim_vector})...")
                     res = run_detection_pipeline(
                         video_to_analyze,
                         attestation_mode=attestation_arg,
@@ -476,12 +524,16 @@ elif app_mode == "System & Attestation Inspector":
     st.subheader(":material/security: Real-Time Host & Video Hardware Integrity Audit")
     st.markdown(
         "Performs live, un-mocked diagnostic probing of your host operating system, "
-        "video device drivers, hypervisor markers, and execution privileges."
+        "video device drivers, hypervisor markers, ACPI power/thermal telemetry, and execution privileges."
     )
 
     t_probe_start = time.perf_counter()
     live_host_data = host_integrity.probe_host_integrity()
     probe_latency = (time.perf_counter() - t_probe_start) * 1000.0
+
+    plat = live_host_data.get("hardware_telemetry", {})
+    cam = live_host_data.get("camera_audit", {})
+    tamper = live_host_data.get("anti_tampering", {})
 
     top_m1, top_m2, top_m3, top_m4 = st.columns(4)
     with top_m1:
@@ -494,49 +546,82 @@ elif app_mode == "System & Attestation Inspector":
         st.metric(
             "Measured Probe Latency",
             f"{live_host_data['latency_ms']:.2f} ms",
-            delta="Sub-1ms Target",
+            delta="Sub-10ms Hardware Target",
         )
     with top_m3:
         st.metric(
-            "Hypervisor / VM",
-            "Detected" if live_host_data["emulator_detected"] else "Bare Metal",
-            delta="Clean" if not live_host_data["emulator_detected"] else "Risk Flag",
-            delta_color="normal" if not live_host_data["emulator_detected"] else "inverse",
+            "Platform Virtualization",
+            "Bare Metal" if plat.get("is_bare_metal") else "Hypervisor / VM",
+            delta="Clean" if plat.get("is_bare_metal") else "Risk Flag",
+            delta_color="normal" if plat.get("is_bare_metal") else "inverse",
         )
     with top_m4:
         st.metric(
-            "Virtual Camera Drivers",
-            "Detected" if live_host_data["virtual_camera_detected"] else "None Detected",
-            delta="Physical Camera" if not live_host_data["virtual_camera_detected"] else "Injection Risk",
-            delta_color="normal" if not live_host_data["virtual_camera_detected"] else "inverse",
+            "Primary Video Bus",
+            f"{cam.get('primary_driver', 'UVC')}",
+            delta=f"{cam.get('primary_bus', 'USB')}",
+            delta_color="normal" if not cam.get("is_virtual") else "inverse",
         )
 
     st.write("---")
 
-    card1, card2 = st.columns(2, gap="large")
+    # 4 Detailed Diagnostic Cards
+    row1_c1, row1_c2 = st.columns(2, gap="medium")
 
-    with card1:
+    with row1_c1:
         with st.container(border=True):
-            st.subheader(":material/videocam: Enumerated Video Capture Devices")
+            st.subheader(":material/videocam: Camera Hardware & V4L2 Ioctl Telemetry")
             devices = live_host_data.get("devices", [])
             if devices:
                 for idx, d in enumerate(devices):
                     icon = ":material/videocam_off:" if d["is_virtual"] else ":material/videocam:"
                     v_badge = "**[VIRTUAL LOOPBACK]**" if d["is_virtual"] else "**[PHYSICAL UVC]**"
                     st.markdown(f"{icon} `{d['node']}` — **{d['name']}** {v_badge}")
+                    st.caption(
+                        f"Driver: `{d['driver']}` | Bus: `{d['bus_info']}` | Streaming: `{d['is_streaming']}`\n\n"
+                        f"Sysfs: `{d['bus_sysfs']}`"
+                    )
             else:
                 st.info("No video devices discovered in `/sys/class/video4linux`.")
 
-    with card2:
-        with st.container(border=True):
-            st.subheader(":material/terminal: Host Privileges & Hypervisor Diagnostics")
-            vm_info = live_host_data.get("vm_info", {})
-            priv = live_host_data.get("privileges", {})
+            st.write("---")
+            st.write(f"- **Kernel Loopback Modules Loaded:** `{live_host_data['camera_audit']['loopback_modules'] or 'None (Clean)'}`")
+            st.write(f"- **Injection Processes Active:** `{live_host_data['camera_audit']['injection_processes'] or 'None (Clean)'}`")
 
-            st.write(f"- **System Platform / DMI:** `{vm_info.get('vendor', 'Unknown')}`")
-            st.write(f"- **Containerized Environment:** `{vm_info.get('is_container', False)}`")
-            st.write(f"- **Process Effective UID:** `{priv.get('uid', 'N/A')}` (`is_root={priv.get('is_root', False)}`)")
-            st.write(f"- **SU Binary Presence:** `{priv.get('su_present', False)}`")
+    with row1_c2:
+        with st.container(border=True):
+            st.subheader(":material/developer_board: Motherboard DMI & CPU Silicon Attestation")
+            st.write(f"- **System Vendor:** `{plat.get('vendor')}`")
+            st.write(f"- **Product Model:** `{plat.get('product')}`")
+            st.write(f"- **BIOS Version:** `{plat.get('bios')}`")
+            st.write(f"- **Chassis Form Factor:** `{plat.get('chassis')}`")
+            st.write(f"- **Processor:** `{plat.get('cpu_model')}`")
+            st.write(f"- **Hypervisor CPU Flag:** `{plat.get('hypervisor_cpu_flag')}` (`Bare Metal: {plat.get('is_bare_metal')}`)")
+
+    row2_c1, row2_c2 = st.columns(2, gap="medium")
+
+    with row2_c1:
+        with st.container(border=True):
+            st.subheader(":material/battery_charging_full: ACPI Physical Power & Thermal Telemetry")
+            st.markdown(
+                "Emulators, cloud VMs, and containerized injection environments lack physical battery "
+                "management nodes and real silicon thermal zones."
+            )
+            st.write(f"- **Battery Detected:** `{plat.get('battery_detected')}`")
+            if plat.get("battery_detected"):
+                st.write(f"- **Battery Telemetry:** `{plat.get('battery_summary')}`")
+            if plat.get("thermal_temp_c") is not None:
+                st.write(f"- **Silicon Thermal Zone (acpitz):** `{plat.get('thermal_temp_c')}°C`")
+            st.success("Physical power subsystem confirms execution on genuine laptop hardware.")
+
+    with row2_c2:
+        with st.container(border=True):
+            st.subheader(":material/lock: Process Sandbox & Anti-Debugging Hooks")
+            st.write(f"- **Debugger Attachment (`TracerPid`):** `{tamper.get('tracer_pid')}` (`Clean: {not tamper.get('is_debugger_attached')}`)")
+            st.write(f"- **Dynamic Linker Hook (`LD_PRELOAD`):** `{'Clean' if not tamper.get('is_injected') else tamper.get('ld_preload')}`")
+            st.write(f"- **Process Effective UID:** `{tamper.get('uid')}` (`is_root={tamper.get('is_root')}`)")
+            st.write(f"- **Linux Effective Capabilities (`CapEff`):** `{tamper.get('cap_eff')}`")
+            st.write(f"- **SU Binary Presence:** `{tamper.get('su_present')}`")
 
     st.write("---")
     st.subheader(":material/phone_android: Mobile Client Attestation Payload Tester")
