@@ -43,6 +43,7 @@ import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+import cv2
 import numpy as np
 
 # --------------------------------------------------------------------------- #
@@ -662,12 +663,19 @@ def analyze_challenge_response(luma: Sequence[float], command: Sequence[int], ma
     return best
 
 
-def _center_luma(frame: np.ndarray) -> float:
-    h, w = frame.shape[:2]
-    roi = frame[h // 4: 3 * h // 4, w // 4: 3 * w // 4]
-    if roi.ndim == 3:
-        roi = roi.mean(axis=2)
-    return float(roi.mean())
+def _small_gray(frame: np.ndarray) -> np.ndarray:
+    g = frame if frame.ndim == 2 else frame.mean(axis=2)
+    return cv2.resize(g.astype(np.float32), (80, 60), interpolation=cv2.INTER_AREA)
+
+
+def brightness_shift(frame: np.ndarray, reference: np.ndarray) -> float:
+    """
+    Global brightness change of `frame` relative to `reference` (an 80x60 grey thumbnail):
+    the median per-pixel difference. A brightness command shifts every pixel equally, while
+    a person moving in front of the camera changes only part of the image, so the median
+    stays on the commanded shift as long as less than half of the frame moves.
+    """
+    return float(np.median(_small_gray(frame) - reference))
 
 
 def run_sensor_challenge(device_node: str, read_frame: Callable[[], Optional[np.ndarray]],
@@ -677,6 +685,11 @@ def run_sensor_challenge(device_node: str, read_frame: Callable[[], Optional[np.
     Applies a random balanced +/- sequence to a hardware image control of `device_node`
     (VIDIOC_S_CTRL) while reading frames with `read_frame` (the capture stream under test),
     then restores the original value. Returns PASS / FAIL / UNSUPPORTED.
+
+    `read_frame` may return a frame, or (frame, capture_timestamp_ms) with the driver's
+    CLOCK_MONOTONIC timestamp (cv2.CAP_PROP_POS_MSEC on V4L2). With timestamps, each frame is
+    labelled with the command active at capture time, which removes the variable latency of
+    the driver's frame queue (it grows at low frame rates).
     """
     cfg = {**CHALLENGE_CONFIG, **(cfg or {})}
     t0 = time.perf_counter()
@@ -716,17 +729,32 @@ def run_sensor_challenge(device_node: str, read_frame: Callable[[], Optional[np.
         for _ in range(cfg["attempts"]):
             seq = make_challenge_sequence(cfg["slots"], cfg["min_sign_changes"], rng)
             luma, command = [], []
+            reference = None
+            set_times: List[tuple] = []  # (monotonic ms when the command was applied, command)
             for s in seq:
                 _set_ctrl(fd, cid, hi if s > 0 else lo)
+                set_times.append((time.monotonic() * 1000.0, s))
                 for _ in range(cfg["frames_per_slot"]):
-                    frame = read_frame()
+                    got = read_frame()
+                    frame, ts = got if isinstance(got, tuple) else (got, None)
                     if frame is None:
                         break
-                    luma.append(_center_luma(frame))
-                    command.append(s)
                     k += 1
                     if on_frame:
                         on_frame(frame, k, total)
+                    if ts is not None:
+                        # Label the frame with the command in effect when the sensor captured it,
+                        # so frames that waited in the driver queue are not mislabelled.
+                        active = [c for (t_set, c) in set_times if t_set <= ts]
+                        if not active:
+                            continue  # captured before the challenge started
+                        cmd = active[-1]
+                    else:
+                        cmd = s
+                    if reference is None:
+                        reference = _small_gray(frame)
+                    luma.append(brightness_shift(frame, reference))
+                    command.append(cmd)
             _set_ctrl(fd, cid, original)
             res = analyze_challenge_response(luma, command, cfg["max_lag"], cfg["min_corr"], cfg["min_effect"])
             res.update({"sequence": seq, "levels": [lo, hi], "frames": len(luma),
@@ -797,9 +825,13 @@ def capture_attested_frames(device_node: str, n_frames: int, width: int = 640, h
             if f is not None and on_frame:
                 on_frame(f, i + 1, warmup_frames, "warmup")
 
+        def read_ts():
+            ok, f = cap.read()
+            return (f, cap.get(cv2.CAP_PROP_POS_MSEC)) if ok else (None, None)
+
         if challenge:
             out["challenge"] = run_sensor_challenge(
-                device_node, read,
+                device_node, read_ts,
                 on_frame=(lambda f, k, n: on_frame(f, k, n, "challenge")) if on_frame else None,
             )
             for _ in range(4):  # settle after restoring the control

@@ -1,5 +1,5 @@
 {
-  "generated": 1791211371.696035,
+  "generated": 1791213161.3950956,
   "n_webcam_sessions": 11,
   "n_corpus_clips": 98,
   "corpus_groups": {
@@ -12,9 +12,9 @@
   },
   "gate1_latency_ms": {
     "n": 20,
-    "min": 9.29,
-    "median": 9.46,
-    "max": 11.68
+    "min": 9.41,
+    "median": 9.71,
+    "max": 12.19
   },
   "reference": {
     "usb-5986-216a-1-3 1280x720": {
@@ -28,16 +28,16 @@
       "genuine_accept_rate": 1.0,
       "impostor_pce": {
         "n": 36,
-        "min": 0.41,
-        "median": 3.35,
+        "min": 0.24,
+        "median": 2.65,
         "max": 16.9
       },
       "impostor_accept_rate": 0.0,
       "impostor_by_group": {
         "real: phone native (VISION)": {
           "n": 20,
-          "min": 0.41,
-          "median": 3.88,
+          "min": 0.38,
+          "median": 3.13,
           "max": 16.9
         },
         "fake: face-swap (DF40)": {
@@ -48,15 +48,15 @@
         },
         "fake: talking-head (DF40)": {
           "n": 5,
-          "min": 1.34,
-          "median": 3.07,
-          "max": 3.43
+          "min": 0.24,
+          "median": 1.42,
+          "max": 3.28
         },
         "fake: text-to-video": {
           "n": 10,
-          "min": 1.35,
-          "median": 3.06,
-          "max": 5.01
+          "min": 1.16,
+          "median": 2.5,
+          "max": 4.89
         }
       },
       "impostor_accept_by_group": {
@@ -74,9 +74,9 @@
         },
         "x264-crf32": {
           "n": 1,
-          "min": 107.52,
-          "median": 107.52,
-          "max": 107.52
+          "min": 16.33,
+          "median": 16.33,
+          "max": 16.33
         },
         "mp4v": {
           "n": 1,
@@ -87,15 +87,15 @@
       },
       "replay_accept_rate": {
         "x264-crf23": 1.0,
-        "x264-crf32": 1.0,
+        "x264-crf32": 0.0,
         "mp4v": 1.0
       },
       "attack_pce": {
         "photo re-animation of a genuine frame": {
           "n": 1,
-          "min": 15.89,
-          "median": 15.89,
-          "max": 15.89
+          "min": 1.0,
+          "median": 1.0,
+          "max": 1.0
         },
         "static replay of a genuine frame": {
           "n": 1,
@@ -110,57 +110,57 @@
       },
       "latency_ms_per_test": {
         "n": 2,
-        "min": 847.15,
-        "median": 852.28,
-        "max": 857.41
+        "min": 851.79,
+        "median": 852.72,
+        "max": 853.66
       }
     },
     "usb-5986-216a-1-3 640x480": {
       "sessions": 8,
       "genuine_pce": {
         "n": 56,
-        "min": 1101.53,
-        "median": 7480.44,
+        "min": 392.26,
+        "median": 2982.9,
         "max": 21227.37
       },
       "genuine_accept_rate": 1.0,
       "impostor_pce": {
         "n": 64,
-        "min": 0.67,
-        "median": 3.7,
-        "max": 17.43
+        "min": 0.31,
+        "median": 2.91,
+        "max": 13.49
       },
       "impostor_accept_rate": 0.0,
       "impostor_by_group": {
         "real: phone WhatsApp (VISION)": {
           "n": 12,
-          "min": 1.84,
-          "median": 5.1,
-          "max": 14.82
+          "min": 1.51,
+          "median": 4.0,
+          "max": 7.08
         },
         "real: phone native (VISION)": {
           "n": 22,
-          "min": 0.67,
-          "median": 3.98,
-          "max": 14.79
+          "min": 0.31,
+          "median": 3.25,
+          "max": 13.49
         },
         "fake: face-swap (DF40)": {
           "n": 8,
-          "min": 1.09,
-          "median": 2.33,
-          "max": 10.62
+          "min": 0.83,
+          "median": 1.91,
+          "max": 10.0
         },
         "fake: talking-head (DF40)": {
           "n": 6,
-          "min": 0.84,
-          "median": 2.25,
+          "min": 0.37,
+          "median": 1.2,
           "max": 4.04
         },
         "fake: text-to-video": {
           "n": 16,
-          "min": 1.51,
-          "median": 3.29,
-          "max": 17.43
+          "min": 1.09,
+          "median": 2.91,
+          "max": 10.08
         }
       },
       "impostor_accept_by_group": {
@@ -174,19 +174,19 @@
         "x264-crf23": {
           "n": 7,
           "min": 920.47,
-          "median": 3723.91,
+          "median": 1494.85,
           "max": 7201.94
         },
         "x264-crf32": {
           "n": 7,
-          "min": 227.24,
-          "median": 870.25,
+          "min": 183.82,
+          "median": 456.45,
           "max": 1823.8
         },
         "mp4v": {
           "n": 7,
           "min": 1816.35,
-          "median": 6515.57,
+          "median": 2541.35,
           "max": 12467.11
         }
       },
@@ -198,14 +198,14 @@
       "attack_pce": {
         "photo re-animation of a genuine frame": {
           "n": 7,
-          "min": 8.31,
-          "median": 24.37,
-          "max": 40.76
+          "min": 2.37,
+          "median": 9.34,
+          "max": 25.24
         },
         "static replay of a genuine frame": {
           "n": 7,
-          "min": 1087.89,
-          "median": 3632.3,
+          "min": 734.15,
+          "median": 1454.24,
           "max": 9422.06
         }
       },
@@ -215,9 +215,9 @@
       },
       "latency_ms_per_test": {
         "n": 56,
-        "min": 187.42,
-        "median": 195.64,
-        "max": 204.38
+        "min": 184.55,
+        "median": 191.81,
+        "max": 199.76
       }
     }
   },
@@ -310,8 +310,9 @@
     "false_passes": 0,
     "false_pass_rate": 0.0,
     "rule_of_three_upper_95": 9.174311926605505e-05,
-    "null_corr_p99": 0.622,
-    "null_corr_max": 0.813,
+    "null_corr_p99": 0.593,
+    "null_corr_max": 0.831,
+    "statistic": "median per-pixel brightness shift vs first frame (80x60 thumbnail)",
     "config": {
       "slots": 12,
       "frames_per_slot": 4,
@@ -327,21 +328,21 @@
     "genuine_pass": 20,
     "corr": {
       "n": 20,
-      "min": 1.0,
+      "min": 0.91,
       "median": 1.0,
       "max": 1.0
     },
     "effect_grey_levels": {
       "n": 20,
-      "min": 48.63,
+      "min": 41.88,
       "median": 48.75,
-      "max": 49.04
+      "max": 59.05
     },
     "latency_ms": {
       "n": 20,
-      "min": 1579.5,
-      "median": 1580.65,
-      "max": 1583.0
+      "min": 1583.4,
+      "median": 1583.85,
+      "max": 4428.3
     },
     "replay_trials": 11,
     "replay_rejected": 11

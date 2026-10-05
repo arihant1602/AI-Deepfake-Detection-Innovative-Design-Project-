@@ -111,7 +111,7 @@ def static_replay(frame, n, grain=2.0):
 def codec_roundtrip(frames, codec, quality):
     """Lossy re-encode (x264 CRF or OpenCV mp4v) and decode, as a recorded replay would be."""
     tmpdir = tempfile.mkdtemp()
-    src, dst = os.path.join(tmpdir, "src.mkv"), os.path.join(tmpdir, "dst.mp4")
+    dst = os.path.join(tmpdir, "dst.mp4")
     hh, ww = frames.shape[1:]
     if codec == "mp4v":
         vw = cv2.VideoWriter(dst, cv2.VideoWriter_fourcc(*"mp4v"), 30, (ww, hh))
@@ -247,28 +247,33 @@ def exp_temporal(sessions, clips, n=90):
 
 
 def exp_challenge_null(sessions, clips, trials_per_trace=300):
+    """
+    Frames that do NOT respond to the challenge (recorded real and fake clips) scored against
+    random challenge sequences, with exactly the statistic used live: the median brightness
+    shift of each frame relative to the first frame of the window.
+    """
     cfg = h.CHALLENGE_CONFIG
     L = cfg["slots"] * cfg["frames_per_slot"]
-    traces = [[float(f[f.shape[0] // 4: 3 * f.shape[0] // 4, f.shape[1] // 4: 3 * f.shape[1] // 4].mean()) for f in s["frames"]]
-              for s in sessions]
-    traces += [[float(f[f.shape[0] // 4: 3 * f.shape[0] // 4, f.shape[1] // 4: 3 * f.shape[1] // 4].mean()) for f in fr]
-               for _, _, fr in clips]
-    traces = [t for t in traces if len(t) > L]
+    thumbs = [np.stack([h._small_gray(f) for f in s["frames"]]) for s in sessions]
+    thumbs += [np.stack([h._small_gray(f) for f in fr]) for _, _, fr in clips]
+    thumbs = [t for t in thumbs if len(t) > L]
     rng = random.Random(7)
     n = fp = 0
     corrs = []
-    for tr in traces:
+    for th in thumbs:
         for _ in range(trials_per_trace):
-            s = rng.randrange(0, len(tr) - L)
+            s = rng.randrange(0, len(th) - L)
+            trace = [float(np.median(th[i] - th[s])) for i in range(s, s + L)]
             seq = h.make_challenge_sequence(cfg["slots"], cfg["min_sign_changes"], rng)
-            r = h.analyze_challenge_response(tr[s:s + L], [v for v in seq for _ in range(cfg["frames_per_slot"])],
+            r = h.analyze_challenge_response(trace, [v for v in seq for _ in range(cfg["frames_per_slot"])],
                                              cfg["max_lag"], cfg["min_corr"], cfg["min_effect"])
             n += 1
             fp += r["passed"]
             corrs.append(r["corr"])
-    out = {"traces": len(traces), "trials": n, "false_passes": fp, "false_pass_rate": fp / n,
+    out = {"traces": len(thumbs), "trials": n, "false_passes": fp, "false_pass_rate": fp / n,
            "rule_of_three_upper_95": (3.0 / n) if fp == 0 else None,
            "null_corr_p99": round(float(np.percentile(corrs, 99)), 3), "null_corr_max": round(float(np.max(corrs)), 3),
+           "statistic": "median per-pixel brightness shift vs first frame (80x60 thumbnail)",
            "config": {k: cfg[k] for k in ("slots", "frames_per_slot", "min_corr", "min_effect", "max_lag", "attempts")}}
     print(f"[challenge null] {out}", flush=True)
     return out
@@ -359,12 +364,25 @@ def main():
     ap.add_argument("--live-trials", type=int, default=20)
     ap.add_argument("--n-test", type=int, default=45, help="frames per verification in reference mode")
     ap.add_argument("--skip-temporal", action="store_true")
+    ap.add_argument("--only", choices=["challenge"], help="re-run only these experiments and update the saved results")
     args = ap.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
     sessions = webcam_sessions()
     clips = corpus_clips(90)
     print(f"{len(sessions)} webcam sessions, {len(clips)} corpus clips", flush=True)
+
+    if args.only == "challenge":
+        with open(os.path.join(OUT, "benchmark_results.json")) as f:
+            res = json.load(f)
+        res["challenge_null"] = exp_challenge_null(sessions, clips)
+        if args.live:
+            res["challenge_live"] = exp_challenge_live(args.live, args.live_trials, sessions)
+        with open(os.path.join(OUT, "benchmark_results.json"), "w") as f:
+            json.dump(res, f, indent=2, default=_json_default)
+        write_markdown(res, os.path.join(OUT, "BENCHMARK_RESULTS.md"))
+        print("updated challenge results")
+        return
 
     res = {"generated": time.time(), "n_webcam_sessions": len(sessions), "n_corpus_clips": len(clips),
            "corpus_groups": dict(Counter(g for g, _, _ in clips))}

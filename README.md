@@ -29,11 +29,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The app opens on the **gate-by-gate demo**: capture 3 s from the camera, then step through one tab per
-gate. Each tab states the question, runs the gate on that clip and draws the evidence: the device table vs
-an OBS virtual camera, the challenge square wave, the PRNU correlation peak and the temporal signals. The
-**attack lab** runs each attack (virtual camera, replay, AI video via a hook, emulator) and shows which gate
-stops it. Enroll the camera once (Gate 2 tab) before demonstrating.
+The **Live** page runs every check continuously on the camera, on one screen: live video, the verdict,
+a tile per gate, the fingerprint and motion scores over the last minute, the latest liveness pattern,
+and an event log. Press **Start**, then **Enroll camera** once (move the camera slowly for 5 s).
+**Simulate an attack** swaps the frames for a replay or an AI video mid-stream so you can watch the checks
+react. The camera is released on **Stop**, when you leave the page, or within 8 s of closing the tab.
+**Analyze a file** and **Device** are secondary pages.
 
 Live session from the CLI:
 
@@ -49,7 +50,7 @@ stored in `fingerprints/` (git-ignored).
 ## Tests and benchmark
 
 ```bash
-python run_tests.py                                  # 56 unit / integration tests, no camera needed
+python run_tests.py                                  # 57 unit / integration tests, no camera needed
 python benchmarks/fetch_datasets.py                  # VISION phone videos + DF40 deepfakes + text-to-video samples
 python benchmarks/capture_webcam_sessions.py --sessions 4 --gap 30
 python benchmarks/run_benchmark.py --live /dev/video0
@@ -60,8 +61,11 @@ Results are written to `benchmarks/results/BENCHMARK_RESULTS.md`.
 ## Repository layout
 
 ```
-app.py                              Streamlit portal (demo, live session, enrollment, file analysis, inspector)
-demo.py                             Gate-by-gate demonstration views and attack lab
+app.py                              Streamlit entry point (top navigation)
+app_pages/                          Live (main), Analyze a file, Device
+live_engine.py                      Real-time engine: capture + challenge thread, rolling analysis thread
+ui.py                               Shared verdict / gate-strip rendering (file analysis)
+.streamlit/config.toml              Theme (light and dark)
 pipeline.py                         Gated fusion: run_live_session, enroll_live_camera, run_detection_pipeline
 host_integrity.py                   Gate 1: V4L2/sysfs attestation, host checks, active sensor challenge
 camera_sensor_noise_profiling.py    Gate 2: PRNU residuals, fingerprints, reference PCE, blind motion-gated test

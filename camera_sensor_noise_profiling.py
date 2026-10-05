@@ -92,7 +92,7 @@ CONFIG = {
     "rho_absent": 0.04,               # correlation below which PRNU is ABSENT
     # --- reference mode ---
     "pce_peak_radius": 2,
-    "pce_search_radius": 3,           # the peak may sit a few pixels off (0,0): sensor-mode scaler/crop phase
+    "pce_search_radius": 2,           # the peak may sit a few pixels off (0,0): sensor-mode scaler/crop phase
     "pce_match_thresh": 60.0,         # standard PCE decision threshold (Goljan 2009)
     "random_seed": 1234,
 }

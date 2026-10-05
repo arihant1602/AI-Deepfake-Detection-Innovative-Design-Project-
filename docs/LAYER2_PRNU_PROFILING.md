@@ -19,7 +19,8 @@ temporal noise. `K` is locked to the pixel grid and differs between sensors (Luk
    clamping. Peak clamping removes the JPEG/H.264 block grid and CFA periodicities that every camera and
    codec share.
 3. **Reference mode (enforced)**: correlate the clip's summed residual with `I·K_ref` and score the
-   **PCE**. The clip matches the enrolled camera if PCE ≥ 60. Fingerprints are stored per **Layer 1
+   **PCE**, taken at the strongest peak within ±2 px of zero shift (session-to-session crop offsets).
+   The clip matches the enrolled camera if PCE ≥ 60. Fingerprints are stored per **Layer 1
    camera ID + sensor mode** (`FingerprintStore`), so the PRNU check is bound to the attested
    physical device.
 4. **Blind mode (advisory)**: estimate `K_A` and `K_B` from temporally disjoint halves and correlate them

@@ -181,6 +181,16 @@ class TestSensorChallengeAnalysis(unittest.TestCase):
             fails += not h.analyze_challenge_response(luma, self.command(seq))["passed"]
         self.assertEqual(fails, 200)
 
+    def test_brightness_shift_ignores_a_moving_subject(self):
+        # A subject covering a third of the frame moves while a +20 offset is applied:
+        # the median shift must still report the offset, not the subject.
+        rng = np.random.default_rng(3)
+        base = rng.uniform(60, 180, (480, 640)).astype(np.float32)
+        ref = h._small_gray(base)
+        frame = base + 20.0
+        frame[100:380, 200:420] = rng.uniform(0, 255, (280, 220))
+        self.assertAlmostEqual(h.brightness_shift(frame, ref), 20.0, delta=1.0)
+
     def test_tiny_response_fails_effect_threshold(self):
         seq = h.make_challenge_sequence(self.cfg["slots"], self.cfg["min_sign_changes"], random.Random(5))
         cmd = np.array(self.command(seq), dtype=float)

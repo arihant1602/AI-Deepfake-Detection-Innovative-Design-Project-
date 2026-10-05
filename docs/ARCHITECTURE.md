@@ -171,7 +171,16 @@ physical sensor, do these frames change?*
 2. Draw a random, balanced sequence of 12 slots (±Δ, Δ = 10% of the control range, at least 5 sign
    changes) from `random.SystemRandom`.
 3. For each slot, set the control via `VIDIOC_S_CTRL` on a second fd to the attested node, and read
-   4 frames from the *capture stream under test*. Record the mean luma of the central 50% of each frame.
+   4 frames from the *capture stream under test*. For each frame, record the **median per-pixel brightness
+   change** against the first frame of the test (80×60 thumbnail). The brightness command shifts every
+   pixel equally, while a person moving changes only part of the image, so the median stays on the
+   commanded shift as long as less than half the frame moves. (The first version used the mean luma of the
+   centre; one genuine trial failed at r = 0.25 while someone moved.)
+   Each frame is labelled with the command that was active **when the sensor captured it**, using the
+   driver's CLOCK_MONOTONIC buffer timestamp (`CAP_PROP_POS_MSEC`). At low frame rates (the webcam drops
+   to 9–10 fps in dim light) frames wait in the driver queue for a variable time, which made the delay
+   jitter between 1 and 2 frames and pushed genuine r down to 0.74–0.79. Timestamp labelling removes
+   this: at 10 fps all checks scored r ≥ 0.99 with zero lag.
 4. Restore the original value in a `finally` block. Verified after every run: brightness returned to 128.
 5. Statistic: the **partial correlation** of luma with the command, controlling for a linear trend
    (auto-exposure drift), maximised over 0–3 frames of latency. Both series are residualised on
@@ -203,18 +212,21 @@ about 1% in amplitude (Lukáš et al. 2006).
   JPEG/H.264 block grid and CFA periodicities shared by all cameras and codecs.
 
 **Reference mode (enforced).** PCE (Goljan et al. 2009) between the cleaned sum of residuals and
-`Σ I·K_ref`, taken at the strongest peak within **±3 px of zero shift**. The match threshold is 60.
+`Σ I·K_ref`, taken at the strongest peak within **±2 px of zero shift**. The match threshold is 60.
 The search is needed because genuine sessions of the same webcam were measured with the peak at
-(0, ±2) in 27 of 56 session pairs when searching ±2 px (the jump in the minimum at ±3 px shows that
-some pairs peak 3 px off), and at (−1, 0) for a live enrollment. The camera's scaler/crop phase
+(0, ±2) in 27 of 56 session pairs, and at (−1, 0) for a live enrollment. The camera's scaler/crop phase
 shifts slightly between stream starts. Scoring only (0, 0) reads the shoulder of the peak. Measured
 over the 56 genuine pairs and 64 impostors at 640×480:
 
 | Search | genuine min / median | foreign impostor max | animated photo of this camera, max |
 |---|---|---|---|
 | (0, 0) only | 307 / 1,815 | 13.2 | 12.5 |
-| ±2 px | 392 / 2,983 | 13.5 | 23.9 |
-| **±3 px (used)** | **1,102 / 7,480** | **17.4** | 36.5–40.8 |
+| **±2 px (used)** | **392 / 2,983** | **13.5** | **23.9–25.2** |
+| ±3 px | 1,102 / 7,480 | 17.4 | 36.5–40.8; one live demo run reached 54 |
+
+±3 px gives genuine sessions more headroom, but it lets a re-animated photo of this camera's own frame
+creep towards the threshold (54 of 60 in one live run). ±2 px keeps every margin wide: genuine ≥ 6.5×
+above, foreign sources ≥ 4.4× below, own-photo animation ≥ 2.4× below.
 
 A sensor-mode mismatch (different resolution) returns
 INCONCLUSIVE, because PRNU is only comparable within one readout/scaling mode. A 1280×720 capture
@@ -276,6 +288,32 @@ Pipeline-level changes:
     less is `NO ANOMALY DETECTED` with a `limitations` list, e.g. "Gate 3 abstained (face found in
     0 frames)" or "no enrolled fingerprint: PRNU advisory".
 
+### 4.6 Live operation (`live_engine.py`, `app_pages/live.py`)
+
+The app runs the gates **continuously** on an open camera instead of on a recorded clip:
+
+- A **capture thread** owns the camera and streams frames into a ring buffer. It runs the Gate 1b
+  challenge at start, every 10 s, and immediately whenever the fingerprint score drops below the
+  threshold (an adaptive re-check). Each check takes ~1.6 s and visibly flashes the picture.
+- An **analysis thread** re-runs Gate 2 (reference PCE) and Gate 3 (temporal score) once per second on
+  the last 45 non-challenge frames. Every threshold crossing is logged as an event ("sensor fingerprint
+  lost", "liveness check failed", "motion anomaly"), and the page shows the live verdict, per-gate tiles
+  and the 60-second history of each score.
+- A shared **compute lock** pauses analysis while a challenge runs. Without it, CPU contention starved
+  the capture thread, frames queued in the driver, and genuine checks failed (r ≈ 0.75).
+- **Enrollment** happens inside the session: the next 150 non-challenge frames become the fingerprint,
+  and it is refused unless the latest liveness check passed.
+- **Camera lifetime:** the camera is released on Stop, when the user leaves the page, when the browser
+  stops polling for 8 s (tab closed), when another session takes the camera over, or at process exit.
+  The page only polls while a session is running. Verified in a browser: released after Stop, and
+  within 11 s of closing the tab. The server binds to `localhost` only.
+- **Simulated attacks** for demonstration replace the frames *after* the driver (as a hooked capture
+  call would), while the physical camera keeps receiving the challenge:
+  - an AI video makes the fingerprint score collapse within a second (≈5,000 → 2), and the next
+    liveness check fails (r = 0.27)
+  - a replay of the camera's own last 3 s keeps the fingerprint (PCE ≈ 8,600) but fails the liveness
+    check (r = 0.33)
+
 ---
 
 ## 5. Why the combination matters: coverage
@@ -285,12 +323,12 @@ Pipeline-level changes:
 
 | Attack | 1a passive | 1b challenge | 2 sensor-bound PRNU | 3 temporal | Combined |
 |---|---|---|---|---|---|
-| A1 virtual camera device | ✔ (node virtual; unit-tested, see §8) | ✔ (measured: replay rejected) | ✔ unless the source is this camera (measured: 0/100 foreign sources, max PCE 17.4) | ✘ | ✔ |
+| A1 virtual camera device | ✔ (node virtual; unit-tested, see §8) | ✔ (measured: replay rejected) | ✔ unless the source is this camera (measured: 0/100 foreign sources, max PCE 16.9) | ✘ | ✔ |
 | A2 real-time face swap via virtual cam | ✔ | ✔ | ✘ background keeps real PRNU | ✘ (measured: 0/28 DF40 face swaps flagged) | ✔ |
 | A3 hooked capture inside process | ✔ if via `LD_PRELOAD`/ptrace | ✔ (frames ignore stimulus) | ✔ if frames are not from this sensor | ◐ | ✔ |
 | A4 VM / emulator / container | ✔ | ✔ (no physical control) | ✔ | ◐ | ✔ |
 | A5 fully synthetic video | ✘ alone | ✔ via channel | ✔ (measured: 0/26 T2V crops matched) | ✘ (measured: 2/16 flagged) | ✔ |
-| A6 photo re-animation | ✘ alone | ✔ via channel | ✔ (measured: 0/8; PCE ≤ 40.8 even when the photo came from this camera) | ✘ (measured: 0/8 DF40 reenactment) | ✔ |
+| A6 photo re-animation | ✘ alone | ✔ via channel | ✔ (measured: 0/8; PCE ≤ 25.2 even when the photo came from this camera) | ✘ (measured: 0/8 DF40 reenactment) | ✔ |
 | A7 replay of footage from another camera | ✘ alone | ✔ | ✔ (measured: 0/54 crops from 11 other phone cameras) | ✘ | ✔ |
 | A8 replay of footage from **this** camera | ✘ alone | ✔ (only defence; measured 11/11 replays rejected) | ✘ (measured: 24/24 lossy replays matched) | ✘ | ✔ via 1b |
 
@@ -331,7 +369,7 @@ These are reportable findings in their own right.
 5. **Challenge statistic.** Detrend both series (partial correlation), or the trend fit eats the signal.
 6. **The PRNU peak is not always at zero shift.** Small inter-session alignment offsets (1–2 px) are
    common on a scaling webcam pipeline. A small shift search is required; this was found through the
-   demo's correlation-surface view.
+   app's correlation-surface view.
 
 ---
 
@@ -355,34 +393,29 @@ large as the sensor mode. Replays and attacks are derived from genuine sessions.
 
 | 640×480 (8 sessions) | n | PCE min / median / max | accepted |
 |---|---|---|---|
-| **Genuine**, other session | 56 | 1,102 / 7,480 / 21,227 | **56/56** |
-| Impostor: phone native (VISION, 11 cameras) | 22 | 0.7 / 4.0 / 14.8 | **0/22** |
-| Impostor: phone WhatsApp (VISION) | 12 | 1.8 / 5.1 / 14.8 | 0/12 |
-| Impostor: DF40 face-swap | 8 | 1.1 / 2.3 / 10.6 | 0/8 |
-| Impostor: DF40 talking-head | 6 | 0.8 / 2.3 / 4.0 | 0/6 |
-| Impostor: text-to-video | 16 | 1.5 / 3.3 / 17.4 | 0/16 |
-| Attack: photo re-animation of a frame **from this camera** | 7 | 8.3 / 24.4 / 40.8 | 0/7 |
-| Replay of genuine session, x264 CRF 23 | 7 | 920 / 3,724 / 7,202 | 7/7 |
-| Replay of genuine session, x264 CRF 32 | 7 | 227 / 870 / 1,824 | 7/7 |
-| Replay of genuine session, OpenCV `mp4v` | 7 | 1,816 / 6,516 / 12,467 | 7/7 |
-| Static replay of a single genuine frame | 7 | 1,088 / 3,632 / 9,422 | 7/7 |
+| **Genuine**, other session | 56 | 392 / 2,983 / 21,227 | **56/56** |
+| Impostor: phone native (VISION, 11 cameras) | 22 | 0.3 / 3.3 / 13.5 | **0/22** |
+| Impostor: phone WhatsApp (VISION) | 12 | 1.5 / 4.0 / 7.1 | 0/12 |
+| Impostor: DF40 face-swap | 8 | 0.8 / 1.9 / 10.0 | 0/8 |
+| Impostor: DF40 talking-head | 6 | 0.4 / 1.2 / 4.0 | 0/6 |
+| Impostor: text-to-video | 16 | 1.1 / 2.9 / 10.1 | 0/16 |
+| Attack: photo re-animation of a frame **from this camera** | 7 | 2.4 / 9.3 / 25.2 | 0/7 |
+| Replay of genuine session, x264 CRF 23 | 7 | 920 / 1,495 / 7,202 | 7/7 |
+| Replay of genuine session, x264 CRF 32 | 7 | 184 / 456 / 1,824 | 7/7 |
+| Replay of genuine session, OpenCV `mp4v` | 7 | 1,816 / 2,541 / 12,467 | 7/7 |
+| Static replay of a single genuine frame | 7 | 734 / 1,454 / 9,422 | 7/7 |
 
 | 1280×720 (2 sessions) | n | PCE min / median / max | accepted |
 |---|---|---|---|
 | **Genuine** | 2 | 3,418 / 3,785 / 4,153 | 2/2 |
-| Impostors (VISION, DF40, T2V crops) | 36 | 0.4 / 3.4 / 16.9 | **0/36** |
-| Replays (x264 CRF 23 / 32, `mp4v`) / static frame | 1 each | 176 / 108 / 385 / 552 | 4/4 |
-| Photo re-animation (this camera) | 1 | 15.9 | 0/1 |
+| Impostors (VISION, DF40, T2V crops) | 36 | 0.2 / 2.7 / 16.9 | **0/36** |
+| Replays: x264 CRF 23 / CRF 32 / `mp4v` / static frame | 1 each | 176 / 16 / 385 / 552 | 3/4 |
+| Photo re-animation (this camera) | 1 | 1.0 | 0/1 |
 
-Overall: **58/58 genuine accepted, 0/100 foreign impostors accepted.** Lowest genuine PCE is 1,102
-(18× the threshold); highest foreign impostor is 17.4 (3.4× below it). Compute is ~0.2 s per 45-frame
-verification at 640×480 and ~0.85 s at 1280×720.
-
-**Re-animated photos of this camera's own frames** reach PCE 40.8: still rejected, but only 1.5× below
-the threshold. They genuinely contain this sensor's PRNU, warped, and the ±3 px search sometimes finds a
-partially aligned position. With ±2 px the maximum is 23.9 but the lowest genuine score drops to 392.
-We keep ±3 px, because footage derived from this camera (A6 built from a stolen frame, A8) is by design
-Gate 1b's job, and false rejection of real users is the costlier error for Gate 2.
+Overall: **58/58 genuine accepted, 0/100 foreign impostors accepted.** Lowest genuine PCE is 392
+(6.5× the threshold); highest foreign impostor is 16.9 (3.6× below it); a re-animated photo of this
+camera's own frame reached 25.2. Compute is ~0.2 s per 45-frame verification at 640×480 and ~0.8 s at
+1280×720.
 
 **Scene-leakage caveat (important).** Every genuine session was captured in the same room, with
 the camera in the same position, so static background texture leaks into the enrolled fingerprint
@@ -427,9 +460,11 @@ What this shows:
 
 | Measure | Result |
 |---|---|
-| Live genuine passes, `/dev/video0` | **20/20**, partial r = 1.00 in every trial, effect 50.8–52.7 grey levels, 1.58 s |
+| Live genuine passes, `/dev/video0` | **20/20**; partial r 0.91–1.00 (median 1.00), effect 42–59 grey levels, 1.58 s (4.4 s when the retry was needed) |
 | Replayed genuine frames read while the physical sensor was challenged | **11/11 rejected** |
-| Null false-pass rate: random windows of 109 real luma traces (webcam, VISION, DF40, T2V) scored against random challenge sequences | **0 / 32,700** (95% upper bound 9.2×10⁻⁵ per attempt); null r p99 = 0.62, max = 0.81, threshold 0.90 |
+| Null false-pass rate: random windows of 109 real luma traces (webcam, VISION, DF40, T2V) scored against random challenge sequences, same median-shift statistic | **0 / 32,700** (95% upper bound 9.2×10⁻⁵ per attempt); null r p99 = 0.59, max = 0.83, threshold 0.90 |
+| Low frame rate (1280×720 YUYV, 10 fps), timestamp labelling | 5/5, r ≥ 0.99, lag 0 |
+| Live engine (continuous session, check every 10 s) | 10/10 consecutive checks passed over two runs, r 0.90–1.00 (one at 0.903, likely motion; the engine retries once before failing) |
 | Control restored after every run | yes (brightness 128 checked with `v4l2-ctl`) |
 | Gate 1a passive probe latency | median 9.7 ms (9.4–11.9 ms) |
 
@@ -480,7 +515,7 @@ Read these before claiming anything in a paper.
 1. **One genuine camera, one room.**
    - All genuine webcam sessions come from a single laptop camera in one room, so genuine PCE
      magnitudes are inflated by shared background texture between enrollment and test sessions.
-   - The lowest genuine PCE (1,102) still shares the room's background with its enrollment session.
+   - The lowest genuine PCE (392) still shares the room's background with its enrollment session.
    - Impostor numbers, by contrast, are over many cameras and generators.
    - A publishable study needs **≥10 distinct webcams**, multiple subjects, lighting conditions,
      low light, and sessions days apart.
@@ -525,8 +560,8 @@ in live capture without any learned model. It does so by:
 - (ii) proving causal control of that sensor over the frame stream with a randomised challenge
 - (iii) verifying the frames' PRNU against a fingerprint enrolled under the attested identity
 
-The evidence so far: 0/100 foreign-source accepts (max PCE 17.4 vs threshold 60), 58/58 genuine
-accepts (min PCE 1,102; single camera, single room), a challenge null false-pass bound of 9×10⁻⁵, and
+The evidence so far: 0/100 foreign-source accepts (max PCE 16.9 vs threshold 60), 58/58 genuine
+accepts (min PCE 392; single camera, single room), a challenge null false-pass bound of 9×10⁻⁵, and
 sub-second compute on a laptop CPU.
 
 **Do not claim** that blind PRNU or Gate 3 detect deepfakes in general; the data here says otherwise.
@@ -572,7 +607,7 @@ layer, the sensor challenge and PRNU binding to the attested identity, and gated
 ## 10. Reproduce
 
 ```bash
-python run_tests.py                                         # 56 tests
+python run_tests.py                                         # 57 tests
 python benchmarks/fetch_datasets.py                         # ~1 GB: VISION subset + DF40 + T2V samples
 python benchmarks/capture_webcam_sessions.py --sessions 4 --gap 30 --tag "<conditions>"
 python benchmarks/run_benchmark.py --live /dev/video0 --live-trials 20
