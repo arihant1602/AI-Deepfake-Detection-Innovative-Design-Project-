@@ -1,5 +1,7 @@
 # Layer 3 - Temporal Consistency & Frequency Analysis
 
+> **Note (Oct 2026):** the algorithm is unchanged. `analyze_frames()` was added so the pipeline passes raw frames (no re-encode), and the face tracker is now reset per clip. Measured behaviour and limitations: [ARCHITECTURE.md](ARCHITECTURE.md), Sections 4.4 and 7.
+
 Owner: **Vibha**
 Part of: Injection Attack & Deepfake Detection pipeline
 (Layer 1 = Aarya's hardware attestation, Layer 2 = Arihant's PRNU sensor noise

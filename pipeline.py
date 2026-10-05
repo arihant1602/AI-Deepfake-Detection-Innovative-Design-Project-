@@ -1,33 +1,43 @@
 """
 Gated Verification Pipeline & Orchestration Engine (Layer 5)
 ============================================================
-Unifies Gate 1 (Host & Device Integrity Attestation),
-        Gate 2 (Camera Sensor Noise Profiling - PRNU),
-        Gate 3 (Temporal Consistency & Frequency Analysis)
-into a sequential, fail-fast forensic verification flow compliant with CEN/TS 18099.
+Sequential, fail-fast fusion of
+  Gate 1  host & camera attestation (passive probe + active sensor challenge)
+  Gate 2  camera sensor noise (PRNU) - enrolled-reference match bound to the Gate 1
+          camera identity; blind motion-gated test when no reference exists (advisory)
+  Gate 3  temporal consistency & frequency analysis
+
+Cheap gates run first and terminate the session as soon as a definitive anomaly is
+found, so the expensive pixel analysis is only spent on sessions that survive.
+Frames are analysed exactly as captured/decoded; they are never re-encoded (a lossy
+re-encode erases the sensor noise Gate 2 measures).
 """
 
 from __future__ import annotations
+
 import argparse
 import json
 import os
 import tempfile
-import cv2
-from typing import Any, Dict, List, Optional, Union
+import time
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
-# Layer 1: Live Host & Device Attestation
+import cv2
+import numpy as np
+
 import host_integrity
 
-# Layer 2: Camera Sensor Noise Profiling (Arihant)
 try:
-    from camera_sensor_noise_profiling import CameraSensorNoiseProfiler
+    from camera_sensor_noise_profiling import (
+        CameraSensorNoiseProfiler, FingerprintStore, read_video_frames,
+        VERDICT_INCONCLUSIVE, VERDICT_PRESENT,
+    )
     HAS_LAYER_2 = True
     prnu_profiler = CameraSensorNoiseProfiler()
 except ImportError:
     HAS_LAYER_2 = False
     prnu_profiler = None
 
-# Layer 3: Temporal Consistency & Frequency Analysis (Vibha)
 try:
     from temporal_consistency_analysis import TemporalConsistencyAnalyzer
     HAS_LAYER_3 = True
@@ -36,318 +46,436 @@ except ImportError:
     HAS_LAYER_3 = False
     temporal_analyzer = None
 
+DEFAULT_FINGERPRINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fingerprints")
+MIN_TEMPORAL_FACE_FRAMES = 8  # Layer 3 abstains below this many face frames
 
-def create_fast_sample_clip(input_path: str, max_frames: int = 45) -> str:
-    """
-    Extracts the first N frames into a lightweight temporary MP4 file
-    so PRNU cross-correlation and temporal FFT analysis complete in ~1-2 seconds.
-    """
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        return input_path
+VERDICT_AUTHENTIC = "AUTHENTIC LIVE STREAM"
+VERDICT_NO_ANOMALY = "NO ANOMALY DETECTED"
+VERDICT_INJECTION_ENV = "DIGITAL INJECTION DETECTED (ENVIRONMENT COMPROMISED)"
+VERDICT_INJECTION_CHALLENGE = "DIGITAL INJECTION DETECTED (SENSOR CHALLENGE FAILED)"
+VERDICT_INJECTION_PRNU = "DIGITAL INJECTION DETECTED"
+VERDICT_DEEPFAKE = "DEEPFAKE DETECTED"
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    # If the video is already short, reuse directly
-    if 0 < total_frames <= max_frames:
-        cap.release()
-        return input_path
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+# --------------------------------------------------------------------------- #
+# Frame helpers
+# --------------------------------------------------------------------------- #
 
-    temp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    temp_path = temp_out.name
-    temp_out.close()
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(temp_path, fourcc, fps, (width, height))
-
-    count = 0
-    while cap.isOpened() and count < max_frames:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        out.write(frame)
-        count += 1
-
-    cap.release()
-    out.release()
-    return temp_path
+def load_frames(video_path: str, max_frames: int) -> List[np.ndarray]:
+    """Decodes the first `max_frames` BGR frames without re-encoding."""
+    frames, _ = read_video_frames(video_path, max_frames)
+    return frames
 
 
 def extract_frames(video_path: str, max_frames: int = 60) -> List[Any]:
-    """Extracts decoded RGB frames for visual pipeline review and gallery display."""
+    """Decoded RGB frames for the UI gallery."""
     cap = cv2.VideoCapture(video_path)
     frames = []
     while cap.isOpened() and len(frames) < max_frames:
         ret, frame = cap.read()
         if not ret:
             break
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append(frame_rgb)
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     cap.release()
     return frames
 
 
-# Gate 1: Hardware Integrity Check (Aarya's Layer 1 Attestation Engine)
+def create_fast_sample_clip(input_path: str, max_frames: int = 45) -> str:
+    """
+    Writes the first N frames to a temporary MP4 (for previews only).
+    NOT used for analysis: the lossy mp4v re-encode destroys sensor noise.
+    """
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        return input_path
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if 0 < total <= max_frames:
+        cap.release()
+        return input_path
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp.close()
+    out = cv2.VideoWriter(tmp.name, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    count = 0
+    while count < max_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        out.write(frame)
+        count += 1
+    cap.release()
+    out.release()
+    return tmp.name
+
+
+def write_preview_clip(frames: Sequence[np.ndarray], fps: float = 30.0) -> Optional[str]:
+    """Browser-playable preview of captured frames (display only, never analysed)."""
+    if not frames:
+        return None
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp.close()
+    h, w = frames[0].shape[:2]
+    for fourcc in ("avc1", "mp4v"):
+        writer = cv2.VideoWriter(tmp.name, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
+        if writer.isOpened():
+            for f in frames:
+                writer.write(f)
+            writer.release()
+            return tmp.name
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Gate 1
+# --------------------------------------------------------------------------- #
+
 def check_hardware_attestation(
     attestation_input: Optional[Union[str, Dict[str, Any]]] = None,
     video_path: Optional[str] = None,
     camera_node: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Evaluates hardware and OS integrity per CEN/TS 18099 Gate 1:
-    - If attestation_input is None or 'live': executes real-time live host system and video device probes.
-    - If attestation_input is 'file_upload' or 'unattested': inspects container format, stream tags, and encoder provenance.
-    - If attestation_input is a dict/JSON string: evaluates client attestation payload.
-    - If attestation_input is a simulation preset string: evaluates predefined test vector.
+    None / 'live'                      -> passive probe of this host and `camera_node`
+    'file_upload' / 'unattested'       -> uploaded file: origin cannot be attested
+    dict or JSON string                -> Android SDK attestation payload
+    simulation preset name             -> predefined test vector
     """
     if attestation_input in ("file_upload", "unattested", "Standalone File Upload (No Client Attestation)"):
         if video_path and os.path.exists(video_path):
             return host_integrity.probe_uploaded_file_provenance(video_path)
-        return {
-            "passed": True,
-            "blocked": False,
-            "root_detected": False,
-            "emulator_detected": False,
-            "virtual_camera_detected": False,
-            "is_file_upload": True,
-            "latency_ms": 0.1,
-            "verdict": "UNATTESTED_ORIGIN",
-            "details": "Standalone file upload: no live client attestation attached. Deferring to Gate 2/3 forensics.",
-        }
-
+        return {"passed": True, "blocked": False, "verdict": "UNATTESTED_ORIGIN", "root_detected": False,
+                "emulator_detected": False, "virtual_camera_detected": False, "is_file_upload": True,
+                "latency_ms": 0.0, "details": "Uploaded file: no live device to attest."}
     if attestation_input is None or attestation_input in ("live", "live_host", "Real-Time Live Host Probe"):
         return host_integrity.probe_host_integrity(target_camera_node=camera_node)
     return host_integrity.evaluate_client_attestation(attestation_input)
 
 
-# Gate 2: Camera Sensor Noise Profiling (Arihant's Layer 2 Module)
-def check_sensor_noise(video_path: str, ref_fingerprint_path: Optional[str] = None) -> Dict[str, Any]:
+# --------------------------------------------------------------------------- #
+# Gate 2
+# --------------------------------------------------------------------------- #
+
+def check_sensor_noise(
+    video_path: Optional[str] = None,
+    ref_fingerprint_path: Optional[str] = None,
+    frames: Optional[Sequence[np.ndarray]] = None,
+    ref_fingerprint: Optional[np.ndarray] = None,
+    max_frames: int = 90,
+) -> Dict[str, Any]:
     """
-    Executes Photo-Response Non-Uniformity (PRNU) noise analysis to detect
-    whether a stationary, static physical sensor noise pattern exists across frames.
-    Distinguishes genuine CMOS cameras from synthetic/injected streams without requiring pre-enrolled matching.
+    Runs Layer 2. With a reference fingerprint the result is *enforced* (a mismatch
+    terminates the session). Without one, the blind test is advisory only: on real
+    in-the-wild video it cannot separate camera PRNU from generator/codec fingerprints
+    reliably enough to block (see docs/ARCHITECTURE.md, Section 6).
     """
     if not HAS_LAYER_2 or prnu_profiler is None:
-        return {
-            "passed": False,
-            "static_noise_detected": False,
-            "score": 1.0,
-            "pce_score": 0.0,
-            "persistence": 0.0,
-            "explanation": "PRNU Engine unavailable: camera_sensor_noise_profiling module could not be imported.",
-        }
+        return {"passed": True, "enforced": False, "verdict": "UNAVAILABLE", "mode": None, "score": None,
+                "explanation": "PRNU module could not be imported.", "static_noise_detected": None}
 
-    try:
-        res = prnu_profiler.analyze(video_path, ref_fingerprint_path=ref_fingerprint_path)
-    except Exception as e:
-        return {
-            "passed": False,
-            "static_noise_detected": False,
-            "score": 1.0,
-            "pce_score": 0.0,
-            "persistence": 0.0,
-            "explanation": f"PRNU Execution Error: {str(e)}",
-        }
+    if ref_fingerprint is None and ref_fingerprint_path:
+        try:
+            ref_fingerprint = np.load(ref_fingerprint_path).astype(np.float32)
+        except (OSError, ValueError) as e:
+            return {"passed": True, "enforced": False, "verdict": "UNAVAILABLE", "mode": "reference", "score": None,
+                    "explanation": f"Could not load reference fingerprint: {e}", "static_noise_detected": None}
 
-    flagged = getattr(res, "flagged", False)
-    score = getattr(res, "score", 0.0)
-    explanation = getattr(res, "explanation", "PRNU analysis complete.")
+    t0 = time.perf_counter()
+    if frames is None:
+        try:
+            frames = load_frames(video_path, max_frames)
+        except IOError as e:
+            return {"passed": True, "enforced": False, "verdict": "UNAVAILABLE", "mode": None, "score": None,
+                    "explanation": str(e), "static_noise_detected": None}
+    res = prnu_profiler.analyze_frames(frames, ref_fingerprint=ref_fingerprint)
+    latency_ms = (time.perf_counter() - t0) * 1000.0
 
-    components = getattr(res, "components", {})
-    if isinstance(components, dict):
-        pce = components.get("pce_score", 0.0)
-        persistence = components.get("inter_frame_persistence", 0.0)
-        static_noise_detected = components.get("static_noise_detected", not flagged)
-    else:
-        pce = getattr(components, "pce_score", 0.0)
-        persistence = getattr(components, "inter_frame_persistence", 0.0)
-        static_noise_detected = getattr(components, "static_noise_detected", not flagged)
-
+    c = res.components
+    enforced = res.mode == "reference" and res.verdict != VERDICT_INCONCLUSIVE
     return {
-        "passed": not flagged,
-        "static_noise_detected": static_noise_detected,
-        "score": score,
-        "pce_score": pce,
-        "persistence": persistence,
-        "explanation": explanation,
+        "passed": not (enforced and res.flagged),
+        "enforced": enforced,
+        "flagged": res.flagged,
+        "verdict": res.verdict,
+        "mode": res.mode,
+        "static_noise_detected": c.get("static_noise_detected"),
+        "score": res.score,
+        "confidence": res.confidence,
+        "pce_score": c.get("pce_score"),
+        "z_score": c.get("z_score"),
+        "rho": c.get("rho"),
+        "changed_fraction": c.get("changed_fraction"),
+        "frames_analyzed": res.frames_analyzed,
+        "latency_ms": round(latency_ms, 1),
+        "explanation": res.explanation,
         "raw_result": res,
     }
 
 
-# Gate 3: Temporal Consistency & Frequency Analysis (Vibha's Layer 3 Module)
-def check_temporal_coherence(video_path: str) -> Dict[str, Any]:
-    """
-    Executes Farneback optical flow coherence, high-frequency energy ratio,
-    Canny edge stability, and 1D temporal FFT power spectral density analysis.
-    """
+# --------------------------------------------------------------------------- #
+# Gate 3
+# --------------------------------------------------------------------------- #
+
+def check_temporal_coherence(video_path: Optional[str] = None, frames: Optional[Sequence[np.ndarray]] = None,
+                             max_frames: int = 90) -> Dict[str, Any]:
     if not HAS_LAYER_3 or temporal_analyzer is None:
-        return {
-            "passed": False,
-            "score": 1.0,
-            "confidence": 0.0,
-            "flicker_rate": 0.0,
-            "flow_incoherence": 0.0,
-            "periodicity_anomaly": 0.0,
-            "explanation": "Temporal Engine unavailable: temporal_consistency_analysis module could not be imported.",
-        }
-
+        return {"passed": True, "abstained": True, "score": None, "explanation": "Temporal module could not be imported."}
+    t0 = time.perf_counter()
     try:
-        res = temporal_analyzer.analyze(video_path)
-    except Exception as e:
-        return {
-            "passed": False,
-            "score": 1.0,
-            "confidence": 0.0,
-            "flicker_rate": 0.0,
-            "flow_incoherence": 0.0,
-            "periodicity_anomaly": 0.0,
-            "explanation": f"Temporal Analysis Error: {str(e)}",
-        }
-
-    flagged = getattr(res, "flagged", False)
-    score = getattr(res, "score", 0.0)
-    explanation = getattr(res, "explanation", "Temporal consistency check complete.")
-    confidence = getattr(res, "confidence", 1.0)
-
-    components = getattr(res, "components", {})
-    if isinstance(components, dict):
-        flicker = components.get("flicker_rate", 0.0)
-        flow_incoherence = components.get("flow_incoherence", 0.0)
-        periodicity = components.get("temporal_periodicity_anomaly", 0.0)
-        hf_cv = components.get("hf_energy_coefficient_of_variation", 0.0)
-    else:
-        flicker = getattr(components, "flicker_rate", 0.0)
-        flow_incoherence = getattr(components, "flow_incoherence", 0.0)
-        periodicity = getattr(components, "temporal_periodicity_anomaly", 0.0)
-        hf_cv = getattr(components, "hf_energy_coefficient_of_variation", 0.0)
-
+        if frames is None:
+            frames = load_frames(video_path, max_frames)
+        res = temporal_analyzer.analyze_frames(frames)
+    except Exception as e:  # Layer 3 is third-party code from the pipeline's point of view
+        return {"passed": True, "abstained": True, "score": None, "explanation": f"Temporal analysis error: {e}"}
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+    c = res.components or {}
     return {
-        "passed": not flagged,
-        "score": score,
-        "confidence": confidence,
-        "flicker_rate": flicker,
-        "flow_incoherence": flow_incoherence,
-        "periodicity_anomaly": periodicity,
-        "hf_cv": hf_cv,
-        "explanation": explanation,
+        "passed": not res.flagged,
+        "abstained": res.frames_with_face < MIN_TEMPORAL_FACE_FRAMES,
+        "score": res.score,
+        "confidence": res.confidence,
+        "frames_analyzed": res.frames_analyzed,
+        "frames_with_face": res.frames_with_face,
+        "flicker_rate": c.get("flicker_rate", 0.0),
+        "flow_incoherence": c.get("flow_incoherence", 0.0),
+        "periodicity_anomaly": c.get("temporal_periodicity_anomaly", 0.0),
+        "hf_cv": c.get("hf_energy_coefficient_of_variation", 0.0),
+        "latency_ms": round(latency_ms, 1),
+        "explanation": res.explanation,
         "raw_result": res,
     }
 
 
-# Layer 5: Gated Execution Fusion
+# --------------------------------------------------------------------------- #
+# Fusion
+# --------------------------------------------------------------------------- #
+
+def _fuse(hw: Dict[str, Any], challenge: Optional[Dict[str, Any]], prnu: Dict[str, Any],
+          temporal: Dict[str, Any], live: bool) -> Dict[str, Any]:
+    """Final verdict for a session that survived every gate."""
+    limits: List[str] = []
+    if hw.get("verdict") == "UNATTESTED_ORIGIN":
+        limits.append("origin unattested (uploaded file: no live device to verify)")
+    elif hw.get("verdict") == "FLAG_FOR_REVIEW":
+        limits.append(f"Gate 1 flag: {hw.get('details')}")
+    if not live:
+        limits.append("file input: no live sensor challenge possible, so liveness of the source is not proven")
+    elif not challenge or challenge.get("verdict") != "PASS":
+        limits.append("active sensor challenge not performed / unsupported by this camera")
+    if prnu.get("mode") != "reference" or prnu.get("verdict") != VERDICT_PRESENT:
+        if prnu.get("mode") == "blind":
+            limits.append(f"no enrolled sensor fingerprint: PRNU blind test is advisory only (result {prnu.get('verdict')})")
+        else:
+            limits.append(f"PRNU not verified ({prnu.get('verdict')})")
+    if temporal.get("abstained"):
+        limits.append(f"Gate 3 abstained (face found in {temporal.get('frames_with_face', 0)} frames, "
+                      f"needs {MIN_TEMPORAL_FACE_FRAMES})")
+    verdict = VERDICT_AUTHENTIC if (live and not limits) else VERDICT_NO_ANOMALY
+    return {"verdict": verdict, "limitations": limits}
+
+
 def run_detection_pipeline(
     video_path: str,
     attestation_mode: Optional[Union[str, Dict[str, Any]]] = None,
     ref_fingerprint_path: Optional[str] = None,
     fast_sample: bool = True,
-    max_sample_frames: int = 45,
+    max_sample_frames: int = 60,
     camera_node: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Executes the CEN/TS 18099 Gated Detection Pipeline:
-      1. Gate 1: Hardware & Device Attestation (fail-fast termination)
-      2. Gate 2: PRNU Sensor Noise Profiling (fail-fast termination)
-      3. Gate 3: Temporal & Frequency Consistency (fail-fast termination)
-      4. Complete verification verdict & frame buffer extraction
+    Gated pipeline for a video file (uploaded clip, or a recording with a simulated /
+    client-supplied attestation). `fast_sample` limits analysis to the first
+    `max_sample_frames` decoded frames (no re-encoding).
     """
-    # Gate 1: Hardware / Environment Attestation
-    hw = check_hardware_attestation(attestation_mode, video_path=video_path, camera_node=camera_node)
-    if hw["blocked"]:
-        return {
-            "verdict": "DIGITAL INJECTION DETECTED (ENVIRONMENT COMPROMISED)",
-            "gate": 1,
-            "details": hw,
-        }
+    t0 = time.perf_counter()
+    timings: Dict[str, float] = {}
 
-    # Fast frame sampling for sub-3s response time
-    if fast_sample:
-        sample_clip_path = create_fast_sample_clip(video_path, max_frames=max_sample_frames)
-    else:
-        sample_clip_path = video_path
+    hw = check_hardware_attestation(attestation_mode, video_path=video_path, camera_node=camera_node)
+    timings["gate1_ms"] = hw.get("latency_ms", 0.0)
+    if hw["blocked"]:
+        return {"verdict": VERDICT_INJECTION_ENV, "gate": 1, "details": hw, "timings": timings}
 
     try:
-        # Gate 2: Sensor Noise Profiling (Arihant)
-        prnu = check_sensor_noise(sample_clip_path, ref_fingerprint_path=ref_fingerprint_path)
-        if not prnu["passed"]:
-            return {
-                "verdict": "DIGITAL INJECTION DETECTED",
-                "gate": 2,
-                "details": prnu,
-                "attestation": hw,
-            }
+        frames = load_frames(video_path, max_sample_frames if fast_sample else 100000)
+    except IOError as e:
+        return {"verdict": "ERROR", "gate": None, "details": {"explanation": str(e)}, "timings": timings}
 
-        # Gate 3: Temporal & Frequency Coherence (Vibha)
-        temporal = check_temporal_coherence(sample_clip_path)
-        if not temporal["passed"]:
-            return {
-                "verdict": "DEEPFAKE DETECTED",
-                "gate": 3,
-                "details": temporal,
-                "attestation": hw,
-            }
+    prnu = check_sensor_noise(frames=frames, ref_fingerprint_path=ref_fingerprint_path)
+    timings["gate2_ms"] = prnu.get("latency_ms", 0.0)
+    if not prnu["passed"]:
+        return {"verdict": VERDICT_INJECTION_PRNU, "gate": 2, "details": prnu, "attestation": hw, "timings": timings}
 
-    finally:
-        if sample_clip_path != video_path and os.path.exists(sample_clip_path):
-            try:
-                os.remove(sample_clip_path)
-            except OSError:
-                pass
+    temporal = check_temporal_coherence(frames=frames)
+    timings["gate3_ms"] = temporal.get("latency_ms", 0.0)
+    if not temporal["passed"]:
+        return {"verdict": VERDICT_DEEPFAKE, "gate": 3, "details": temporal, "attestation": hw, "prnu": prnu,
+                "timings": timings}
 
-    frames = extract_frames(video_path, max_frames=32)
-
+    timings["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
+    fused = _fuse(hw, None, prnu, temporal, live=False)
     return {
-        "verdict": "AUTHENTIC LIVE STREAM",
+        "verdict": fused["verdict"],
+        "limitations": fused["limitations"],
         "gate": None,
-        "frames": frames,
-        "details": {
-            "attestation": hw,
-            "prnu": prnu,
-            "temporal": temporal,
-        },
+        "frames": [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames[:32]],
+        "details": {"attestation": hw, "prnu": prnu, "temporal": temporal},
+        "timings": timings,
     }
+
+
+def run_live_session(
+    camera_node: str,
+    n_frames: int = 90,
+    width: int = 640,
+    height: int = 480,
+    fourcc: str = "MJPG",
+    attestation_mode: Optional[Union[str, Dict[str, Any]]] = None,
+    fingerprint_dir: str = DEFAULT_FINGERPRINT_DIR,
+    on_frame: Optional[Callable[[np.ndarray, int, int, str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Live KYC-style session on a local camera:
+      1. passive Gate 1 probe of `camera_node` (BLOCK => the camera is never opened)
+      2. open the node, warm up, run the active sensor challenge on the same stream (FAIL => BLOCK)
+      3. capture `n_frames` raw frames
+      4. Gate 2 against the fingerprint enrolled for this physical camera + mode (enforced),
+         or the blind advisory test if none is enrolled
+      5. Gate 3 on the same raw frames
+    """
+    t0 = time.perf_counter()
+    timings: Dict[str, float] = {}
+
+    if attestation_mode in (None, "live", "live_host", "Real-Time Live Host Probe"):
+        hw = host_integrity.probe_host_integrity(target_camera_node=camera_node)
+    else:
+        hw = host_integrity.evaluate_client_attestation(attestation_mode)
+        hw.setdefault("camera_id", None)
+    timings["gate1_passive_ms"] = hw.get("latency_ms", 0.0)
+    if hw["blocked"]:
+        return {"verdict": VERDICT_INJECTION_ENV, "gate": 1, "details": hw, "timings": timings, "frames_bgr": []}
+
+    cap = host_integrity.capture_attested_frames(camera_node, n_frames, width, height, fourcc, on_frame=on_frame)
+    challenge = cap.get("challenge")
+    if challenge:
+        timings["gate1_challenge_ms"] = challenge.get("latency_ms", 0.0)
+    if cap.get("error"):
+        return {"verdict": "ERROR", "gate": None, "details": {"explanation": cap["error"]}, "timings": timings,
+                "frames_bgr": []}
+    frames = cap["frames"]
+    if challenge and challenge.get("verdict") == "FAIL":
+        return {"verdict": VERDICT_INJECTION_CHALLENGE, "gate": 1, "details": {**hw, "challenge": challenge,
+                "details": challenge["details"], "blocked": True, "verdict": "BLOCK"},
+                "timings": timings, "frames_bgr": frames}
+    if len(frames) < 16:
+        return {"verdict": "ERROR", "gate": None, "details": {"explanation": f"Only {len(frames)} frames captured."},
+                "timings": timings, "frames_bgr": frames}
+
+    store = FingerprintStore(fingerprint_dir)
+    h, w = frames[0].shape[:2]
+    camera_id = hw.get("camera_id")
+    ref = store.load(camera_id, w, h) if camera_id else None
+    prnu = check_sensor_noise(frames=frames, ref_fingerprint=ref)
+    prnu["camera_id"] = camera_id
+    prnu["sensor_mode"] = f"{w}x{h}"
+    timings["gate2_ms"] = prnu.get("latency_ms", 0.0)
+    if not prnu["passed"]:
+        return {"verdict": VERDICT_INJECTION_PRNU, "gate": 2, "details": prnu, "attestation": {**hw, "challenge": challenge},
+                "timings": timings, "frames_bgr": frames}
+
+    temporal = check_temporal_coherence(frames=frames)
+    timings["gate3_ms"] = temporal.get("latency_ms", 0.0)
+    if not temporal["passed"]:
+        return {"verdict": VERDICT_DEEPFAKE, "gate": 3, "details": temporal, "attestation": {**hw, "challenge": challenge},
+                "prnu": prnu, "timings": timings, "frames_bgr": frames}
+
+    timings["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
+    fused = _fuse(hw, challenge, prnu, temporal, live=True)
+    return {
+        "verdict": fused["verdict"],
+        "limitations": fused["limitations"],
+        "gate": None,
+        "frames": [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames[:32]],
+        "frames_bgr": frames,
+        "capture": {k: v for k, v in cap.items() if k not in ("frames", "challenge")},
+        "details": {"attestation": {**hw, "challenge": challenge}, "prnu": prnu, "temporal": temporal},
+        "timings": timings,
+    }
+
+
+def enroll_live_camera(
+    camera_node: str,
+    n_frames: int = 150,
+    width: int = 640,
+    height: int = 480,
+    fourcc: str = "MJPG",
+    fingerprint_dir: str = DEFAULT_FINGERPRINT_DIR,
+    on_frame: Optional[Callable[[np.ndarray, int, int, str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Enrolls the PRNU fingerprint of the physical camera behind `camera_node`. Refuses to
+    enroll unless Gate 1 passes and the sensor answers the active challenge, so a
+    software camera can never be enrolled as trusted.
+    """
+    hw = host_integrity.probe_host_integrity(target_camera_node=camera_node)
+    if hw["blocked"]:
+        return {"enrolled": False, "reason": f"Gate 1 blocked: {hw['details']}", "attestation": hw}
+    cap = host_integrity.capture_attested_frames(camera_node, n_frames, width, height, fourcc, on_frame=on_frame)
+    if cap.get("error"):
+        return {"enrolled": False, "reason": cap["error"], "attestation": hw}
+    ch = cap.get("challenge") or {}
+    if ch.get("verdict") == "FAIL":
+        return {"enrolled": False, "reason": f"Sensor challenge failed: {ch.get('details')}", "attestation": hw}
+    frames = cap["frames"]
+    if len(frames) < 60:
+        return {"enrolled": False, "reason": f"Only {len(frames)} frames captured (need >= 60).", "attestation": hw}
+    fp = prnu_profiler.estimate_fingerprint_from_frames(frames)
+    store = FingerprintStore(fingerprint_dir)
+    path = store.save(hw["camera_id"], fp, {
+        "frames": len(frames), "node": camera_node, "card": hw["camera_audit"]["primary_card"],
+        "fourcc": cap.get("fourcc"), "challenge": ch.get("verdict"),
+    })
+    return {"enrolled": True, "path": path, "camera_id": hw["camera_id"], "sensor_mode": f"{fp.shape[1]}x{fp.shape[0]}",
+            "frames": len(frames), "challenge": ch, "attestation": hw}
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+def _serializable(result: Dict[str, Any]) -> Dict[str, Any]:
+    def clean(v):
+        if isinstance(v, dict):
+            return {k: clean(x) for k, x in v.items() if k not in ("raw_result", "frames", "frames_bgr", "all_devices", "devices")}
+        if isinstance(v, list):
+            return [clean(x) for x in v]
+        return v
+    return clean({k: v for k, v in result.items() if k not in ("frames", "frames_bgr")})
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="End-to-End Gated Deepfake & Injection Attack Detection Pipeline")
-    parser.add_argument("--video", required=True, help="Path to input video stream (.mp4, .mov, .avi)")
-    parser.add_argument(
-        "--attestation-mode",
-        default="Clean Physical Device",
-        help="Simulated client attestation preset ('live' for live host probe, or preset name)",
-    )
-    parser.add_argument("--ref-fingerprint", help="Optional path to reference camera PRNU fingerprint (.npy)")
-    parser.add_argument("--output", help="Optional path to write JSON forensic report")
+    parser = argparse.ArgumentParser(description="Gated injection & deepfake detection pipeline")
+    src = parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("--video", help="Video file to analyse")
+    src.add_argument("--live", metavar="NODE", help="Run a live session on a V4L2 node, e.g. /dev/video0")
+    parser.add_argument("--enroll", action="store_true", help="With --live: enroll the camera fingerprint instead")
+    parser.add_argument("--attestation-mode", default="file_upload",
+                        help="For --video: 'file_upload' (default), 'live', a preset name, or a JSON payload")
+    parser.add_argument("--ref-fingerprint", help="Reference fingerprint (.npy) for --video")
+    parser.add_argument("--frames", type=int, default=90)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--output", help="Write the JSON report here")
     args = parser.parse_args()
 
-    print(f"Running gated forensic pipeline on: {args.video} (Attestation: {args.attestation_mode})")
-    result = run_detection_pipeline(
-        args.video,
-        attestation_mode=args.attestation_mode,
-        ref_fingerprint_path=args.ref_fingerprint,
-    )
-
-    # Clean serializable dictionary
-    serializable_details = {}
-    if "details" in result:
-        for k, v in result["details"].items():
-            if isinstance(v, dict):
-                serializable_details[k] = {sk: sv for sk, sv in v.items() if sk != "raw_result"}
-            else:
-                serializable_details[k] = v
-
-    report = {
-        "verdict": result["verdict"],
-        "gate": result["gate"],
-        "details": serializable_details,
-    }
-
-    report_json = json.dumps(report, indent=2, default=str)
-    print(report_json)
-
+    if args.live and args.enroll:
+        result = enroll_live_camera(args.live, n_frames=max(args.frames, 150), width=args.width, height=args.height)
+    elif args.live:
+        result = run_live_session(args.live, n_frames=args.frames, width=args.width, height=args.height)
+    else:
+        result = run_detection_pipeline(args.video, attestation_mode=args.attestation_mode,
+                                        ref_fingerprint_path=args.ref_fingerprint, max_sample_frames=args.frames)
+    report = json.dumps(_serializable(result), indent=2, default=str)
+    print(report)
     if args.output:
         with open(args.output, "w") as f:
-            f.write(report_json)
-        print(f"Wrote forensic report to: {args.output}")
+            f.write(report)

@@ -27,3 +27,9 @@ htmlcov/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Enrolled camera PRNU fingerprints (device-specific, never commit)
+fingerprints/
+
+# Benchmark data (personal webcam captures, third-party datasets) and results scratch
+benchmarks/data/

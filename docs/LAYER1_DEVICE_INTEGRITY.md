@@ -1,5 +1,7 @@
 # Layer 1 — Device & Environment Integrity Attestation
 
+> **Note (Oct 2026):** this page covers the Android prototype. The desktop/Linux Layer 1 engine (`host_integrity.py`: V4L2/sysfs camera attestation plus the active sensor challenge) is described in [ARCHITECTURE.md](ARCHITECTURE.md), Section 4.1–4.2.
+
 Branch: `device-integrity-attestation`
 Part of: **AI-Deepfake-Detection-Innovative-Design-Project**
 

@@ -218,17 +218,29 @@ class TemporalConsistencyAnalyzer:
         if not cap.isOpened():
             raise IOError(f"Could not open video: {video_path}")
 
+        def frames():
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    return
+                yield frame
+
+        try:
+            return self.analyze_frames(frames())
+        finally:
+            cap.release()
+
+    def analyze_frames(self, frames) -> LayerResult:
+        """Analyzes an iterable of BGR frames (e.g. raw frames from a live capture)."""
+        # Fresh tracker per clip: a face box from a previous clip must not leak into this one.
+        self.face_locator = FaceLocator()
         roi_size = self.cfg["face_roi_size"]
         frame_metrics: list[FrameMetrics] = []
         flow_scores: list[float] = []
         prev_gray_roi: Optional[np.ndarray] = None
         frame_idx = 0
 
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-
+        for frame in frames:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             box = self.face_locator.locate(gray)
 
@@ -257,7 +269,6 @@ class TemporalConsistencyAnalyzer:
             prev_gray_roi = roi
             frame_idx += 1
 
-        cap.release()
         return self._score(frame_metrics, flow_scores)
 
     # ------------------------------------------------------------------ #

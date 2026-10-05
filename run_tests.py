@@ -2,6 +2,7 @@
 Unified Test Runner for AI Deepfake Detection Project
 =====================================================
 Discovers and executes all unit and integration test suites:
+  - Layer 1: test_host_integrity.py (host & camera attestation)
   - Layer 2: test_sensor_noise_profiler.py (PRNU Analysis)
   - Layer 3: test_temporal_consistency.py (Temporal & Frequency Analysis)
   - Layer 5: test_pipeline.py (Gated Verification Pipeline & Attestation)
@@ -16,6 +17,7 @@ def main():
     suite = unittest.TestSuite()
 
     test_modules = [
+        "test_host_integrity",
         "test_sensor_noise_profiler",
         "test_temporal_consistency",
         "test_pipeline",

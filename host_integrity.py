@@ -1,723 +1,916 @@
 """
-Host & Environment Integrity Attestation Engine (Layer 1)
-==========================================================
-Probes the host operating system, video capture devices, hypervisor markers,
-privilege levels, kernel modules, power/thermal telemetry, and process state
-in real time to detect injection attacks, virtual camera drivers,
-and virtualized execution environments directly on local hardware.
+Host & Camera Integrity Attestation Engine (Layer 1)
+====================================================
+Answers, on the local machine, "is the frame source a physical camera sensor in an
+untampered execution environment?" before any pixel analysis runs.
 
-Performs deep hardware inspection:
-- V4L2 kernel device query (VIDIOC_QUERYCAP ioctl: driver, card, bus_info, streaming caps)
-- Sysfs bus hierarchy traversal (confirms PCI/USB root complex, flags /sys/devices/virtual/)
-- Kernel module inspection (/proc/modules for v4l2loopback, akvcam, vloopback)
-- Injection process auditing (/proc comm scan for OBS, Droidcam, Manycam, loopback sinks)
-- Bare-metal platform & DMI verification (Lenovo LOQ / OEM chassis, BIOS, serial)
-- Physical power & thermal telemetry (Battery BAT1 / ACPI thermal zones as anti-VM proof)
-- Anti-tampering & anti-hooking inspection (TracerPid anti-debugger, LD_PRELOAD injection, EUID sandbox)
+Passive checks (no camera access, ~10 ms):
+  - V4L2 node inspection: VIDIOC_QUERYCAP per-node device_caps (a metadata node is
+    not a camera), driver / card / bus_info, sysfs placement of the node
+    (/sys/devices/virtual => software device), bound kernel driver, USB/PCI parent
+    and the physical USB identity (VID:PID, serial, port path).
+  - Loaded kernel modules that create software cameras (v4l2loopback, akvcam, vivid ...).
+  - Running injection tooling, matched on exact process names / command lines
+    (OBS, DroidCam, ManyCam, DeepFaceLive, pyvirtualcam, ffmpeg/gstreamer -> v4l2).
+  - Execution environment: hypervisor CPU flag / DMI vendor, containers,
+    ptrace tracer, LD_PRELOAD, effective root.
 
-Compliant with CEN/TS 18099 Gated Presentation & Injection Attack Detection standards.
+Active check (needs the open capture stream, ~1 s):
+  - Sensor control challenge-response. A random, balanced +/- sequence is applied
+    to a hardware image control (brightness, falling back to gamma / gain) through
+    VIDIOC_S_CTRL on the attested node while frames are read from the capture
+    stream. Frames produced by that physical camera track the sequence; frames
+    from a loopback device, a hooked capture call or a replay do not.
+
+Gating (CEN/TS 18099 style):
+  BLOCK            debugger / LD_PRELOAD hook, VM or container, root, selected node
+                   is not a physical capture device, or the active challenge fails
+  FLAG_FOR_REVIEW  selected camera is physical, but software-camera modules or
+                   injection tools are present on the host
+  PASS             otherwise
 """
 
 from __future__ import annotations
+
 import fcntl
 import glob
 import json
 import os
+import random
 import re
 import struct
 import subprocess
-import sys
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
-# V4L2 IOCTL constants (Linux x86_64 / generic)
-VIDIOC_QUERYCAP = 0x80685600
+import numpy as np
 
-VIRTUAL_CAMERA_SIGNATURES = [
-    "v4l2loopback",
-    "obs",
-    "obs-virtualcam",
-    "dummy",
-    "dummy-uvc",
-    "akvcam",
-    "droidcam",
-    "manycam",
-    "fake",
-    "vloopback",
-    "streamlabs",
-    "ipcamera",
+# --------------------------------------------------------------------------- #
+# V4L2 ABI constants (linux/videodev2.h)
+# --------------------------------------------------------------------------- #
+
+VIDIOC_QUERYCAP = 0x80685600      # _IOR('V', 0, struct v4l2_capability)  (104 bytes)
+VIDIOC_G_CTRL = 0xC008561B        # _IOWR('V', 27, struct v4l2_control)   (8 bytes)
+VIDIOC_S_CTRL = 0xC008561C        # _IOWR('V', 28, struct v4l2_control)
+VIDIOC_QUERYCTRL = 0xC0445624     # _IOWR('V', 36, struct v4l2_queryctrl) (68 bytes)
+
+V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+V4L2_CAP_VIDEO_OUTPUT = 0x00000002
+V4L2_CAP_VIDEO_CAPTURE_MPLANE = 0x00001000
+V4L2_CAP_META_CAPTURE = 0x00800000
+V4L2_CAP_STREAMING = 0x04000000
+V4L2_CAP_DEVICE_CAPS = 0x80000000
+
+V4L2_CTRL_FLAG_DISABLED = 0x0001
+V4L2_CTRL_FLAG_READ_ONLY = 0x0004
+V4L2_CTRL_FLAG_INACTIVE = 0x0010
+V4L2_CTRL_FLAG_NEXT_CTRL = 0x80000000
+V4L2_CTRL_TYPE_INTEGER = 1
+
+V4L2_CID_BRIGHTNESS = 0x00980900
+V4L2_CID_GAMMA = 0x00980910
+V4L2_CID_GAIN = 0x00980913
+CHALLENGE_CONTROLS = [("brightness", V4L2_CID_BRIGHTNESS), ("gamma", V4L2_CID_GAMMA), ("gain", V4L2_CID_GAIN)]
+
+# --------------------------------------------------------------------------- #
+# Signatures
+# --------------------------------------------------------------------------- #
+
+# Kernel drivers (QUERYCAP.driver / sysfs driver name) that implement software cameras.
+VIRTUAL_CAMERA_DRIVERS = {
+    "v4l2 loopback", "v4l2loopback", "akvcam", "vivid", "vimc", "vcam", "obs-virtualcam",
+}
+# Kernel modules that create software cameras when loaded.
+VIRTUAL_CAMERA_MODULES = {"v4l2loopback", "akvcam", "vivid", "vimc", "vcam"}
+# Exact process names (/proc/<pid>/comm, max 15 chars) of camera injection tools.
+INJECTION_PROCESS_NAMES = {
+    "obs", "obs64", "obs-studio", "droidcam", "droidcam-cli", "manycam", "deepfacelive",
+    "snapcamera", "xsplit.vcam", "camtwist", "webcamoid",
+}
+# Command-line patterns (lower-cased) that indicate frames being written into a V4L2 device.
+INJECTION_CMDLINE_PATTERNS = [
+    re.compile(r"deepfacelive"),
+    re.compile(r"pyvirtualcam"),
+    re.compile(r"(^|\s)-f\s+v4l2(\s|$).*?/dev/video\d+"),
+    re.compile(r"v4l2sink"),
 ]
 
 HYPERVISOR_SIGNATURES = [
-    "qemu",
-    "virtualbox",
-    "vmware",
-    "bochs",
-    "kvm",
-    "xen",
-    "bhyve",
-    "innotek",
-    "wsl",
-    "parallels",
-    "hyper-v",
+    "qemu", "virtualbox", "vmware", "bochs", "kvm", "xen", "bhyve", "innotek",
+    "parallels", "hyper-v", "microsoft corporation virtual",
 ]
 
+# Android-specific su locations. /usr/bin/su exists on every desktop Linux and is not an indicator.
+ANDROID_SU_PATHS = ["/system/bin/su", "/system/xbin/su", "/system/sbin/su", "/vendor/bin/su", "/su/bin/su"]
+
 CHASSIS_TYPES = {
-    "1": "Other",
-    "2": "Unknown",
-    "3": "Desktop",
-    "4": "Low Profile Desktop",
-    "8": "Portable",
-    "9": "Laptop",
-    "10": "Notebook / Laptop",
-    "11": "Hand Held",
-    "14": "Sub Notebook",
-    "30": "Tablet",
-    "31": "Convertible",
-    "32": "Detachable",
+    "1": "Other", "2": "Unknown", "3": "Desktop", "4": "Low Profile Desktop", "8": "Portable",
+    "9": "Laptop", "10": "Notebook", "11": "Hand Held", "13": "All in One", "14": "Sub Notebook",
+    "30": "Tablet", "31": "Convertible", "32": "Detachable",
 }
 
 
-def _query_v4l2_ioctl(device_node: str) -> Dict[str, Any]:
-    """
-    Executes VIDIOC_QUERYCAP ioctl on a video device node to obtain
-    low-level driver identification, card name, bus info, and kernel capabilities.
-    """
-    if not os.path.exists(device_node):
-        return {
-            "driver": "unavailable",
-            "card": "Node Not Found",
-            "bus_info": "none",
-            "caps": 0,
-            "is_capture": False,
-            "is_streaming": False,
-        }
+def _read(path: str) -> Optional[str]:
+    try:
+        with open(path, "r", errors="ignore") as f:
+            return f.read().strip()
+    except OSError:
+        return None
 
+
+def _cstr(buf: bytes) -> str:
+    return buf.split(b"\x00")[0].decode("utf-8", errors="ignore").strip()
+
+
+# --------------------------------------------------------------------------- #
+# V4L2 ioctls
+# --------------------------------------------------------------------------- #
+
+def _query_v4l2_ioctl(device_node: str) -> Dict[str, Any]:
+    """VIDIOC_QUERYCAP. Uses the per-node device_caps when the driver reports them."""
+    info = {"driver": "", "card": "", "bus_info": "", "caps": 0, "device_caps": 0,
+            "is_capture": False, "is_output": False, "is_metadata": False, "is_streaming": False,
+            "error": None}
     try:
         fd = os.open(device_node, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as e:
+        info["error"] = f"open failed: {e.strerror}"
+        return info
+    try:
         buf = bytearray(104)
-        fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf)
-        driver = buf[0:16].split(b"\x00")[0].decode("utf-8", errors="ignore").strip()
-        card = buf[16:48].split(b"\x00")[0].decode("utf-8", errors="ignore").strip()
-        bus_info = buf[48:80].split(b"\x00")[0].decode("utf-8", errors="ignore").strip()
-        caps = struct.unpack_from("<I", buf, 84)[0]
+        fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf, True)
+    except OSError as e:
+        info["error"] = f"VIDIOC_QUERYCAP failed: {e.strerror}"
+        return info
+    finally:
         os.close(fd)
-        return {
-            "driver": driver,
-            "card": card,
-            "bus_info": bus_info,
-            "caps": caps,
-            "is_capture": bool(caps & 0x00000001),
-            "is_streaming": bool(caps & 0x04000000),
-        }
-    except Exception as e:
-        return {
-            "driver": f"query-err: {e}",
-            "card": "Unknown Device",
-            "bus_info": "unknown",
-            "caps": 0,
-            "is_capture": False,
-            "is_streaming": False,
-        }
+    caps, device_caps = struct.unpack_from("<II", buf, 84)
+    eff = device_caps if caps & V4L2_CAP_DEVICE_CAPS else caps
+    info.update({
+        "driver": _cstr(buf[0:16]),
+        "card": _cstr(buf[16:48]),
+        "bus_info": _cstr(buf[48:80]),
+        "caps": caps,
+        "device_caps": eff,
+        "is_capture": bool(eff & (V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE)),
+        "is_output": bool(eff & V4L2_CAP_VIDEO_OUTPUT),
+        "is_metadata": bool(eff & V4L2_CAP_META_CAPTURE),
+        "is_streaming": bool(eff & V4L2_CAP_STREAMING),
+    })
+    return info
 
 
-def enumerate_video_devices() -> List[Dict[str, Any]]:
-    """
-    Discovers, enumerates, and deeply inspects all video capture devices on the Linux host.
-    Resolves driver identity, hardware bus topology, and virtual loopback status.
-    """
-    devices: List[Dict[str, Any]] = []
-
-    # Check sysfs video4linux nodes
-    vpaths = sorted(glob.glob("/sys/class/video4linux/video*"))
-    for vpath in vpaths:
-        dev_node = "/dev/" + os.path.basename(vpath)
-        name_file = os.path.join(vpath, "name")
-        card_name = "Unknown Video Device"
-        if os.path.exists(name_file):
+def query_controls(device_node: str) -> Dict[str, Dict[str, int]]:
+    """Enumerates user/camera controls via VIDIOC_QUERYCTRL | V4L2_CTRL_FLAG_NEXT_CTRL."""
+    controls: Dict[str, Dict[str, int]] = {}
+    try:
+        fd = os.open(device_node, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return controls
+    try:
+        cid = V4L2_CTRL_FLAG_NEXT_CTRL
+        for _ in range(256):
+            buf = bytearray(68)
+            struct.pack_into("<I", buf, 0, cid)
             try:
-                with open(name_file, "r") as f:
-                    card_name = f.read().strip()
-            except Exception:
-                pass
+                fcntl.ioctl(fd, VIDIOC_QUERYCTRL, buf, True)
+            except OSError:
+                break
+            qid, qtype = struct.unpack_from("<II", buf, 0)
+            mn, mx, step, default, flags = struct.unpack_from("<iiiiI", buf, 40)
+            controls[_cstr(buf[8:40]) or hex(qid)] = {
+                "id": qid, "type": qtype, "min": mn, "max": mx, "step": step,
+                "default": default, "flags": flags,
+            }
+            cid = qid | V4L2_CTRL_FLAG_NEXT_CTRL
+    finally:
+        os.close(fd)
+    return controls
 
-        # Resolve sysfs device symlink to trace actual bus root (PCI/USB vs virtual)
-        dev_sym = os.path.join(vpath, "device")
-        bus_sysfs = os.path.realpath(dev_sym) if os.path.exists(dev_sym) else ""
-        is_virtual_sysfs = "/devices/virtual/" in bus_sysfs
-        is_physical_bus = ("/usb" in bus_sysfs or "/devices/pci" in bus_sysfs)
 
-        # Run kernel ioctl
-        ioctl_info = _query_v4l2_ioctl(dev_node)
-        driver_name = ioctl_info.get("driver", "unknown")
-        bus_info = ioctl_info.get("bus_info", "unknown")
+def _get_ctrl(fd: int, cid: int) -> int:
+    buf = bytearray(struct.pack("<Ii", cid, 0))
+    fcntl.ioctl(fd, VIDIOC_G_CTRL, buf, True)
+    return struct.unpack("<Ii", buf)[1]
 
-        card_lower = card_name.lower()
-        driver_lower = driver_name.lower()
-        bus_lower = bus_info.lower()
 
-        is_virtual = (
-            is_virtual_sysfs
-            or any(sig in card_lower for sig in VIRTUAL_CAMERA_SIGNATURES)
-            or any(sig in driver_lower for sig in VIRTUAL_CAMERA_SIGNATURES)
-            or "platform:" in bus_lower
-            or "virtual" in bus_lower
-        )
+def _set_ctrl(fd: int, cid: int, value: int) -> None:
+    buf = bytearray(struct.pack("<Ii", cid, int(value)))
+    fcntl.ioctl(fd, VIDIOC_S_CTRL, buf, True)
 
-        devices.append({
-            "node": dev_node,
-            "name": card_name,
-            "driver": driver_name,
-            "card": ioctl_info.get("card", card_name),
-            "bus_info": bus_info,
-            "bus_sysfs": bus_sysfs,
-            "is_physical": is_physical_bus and not is_virtual,
-            "is_virtual": is_virtual,
-            "sysfs_path": vpath,
-            "is_capture": ioctl_info.get("is_capture", True),
-            "is_streaming": ioctl_info.get("is_streaming", True),
-        })
 
-    # Fallback if sysfs is restricted: probe /dev/video* directly
-    if not devices:
-        for node in sorted(glob.glob("/dev/video*")):
-            ioctl_info = _query_v4l2_ioctl(node)
-            devices.append({
-                "node": node,
-                "name": ioctl_info.get("card", "Generic Video Device"),
-                "driver": ioctl_info.get("driver", "generic"),
-                "card": ioctl_info.get("card", "Generic Video Device"),
-                "bus_info": ioctl_info.get("bus_info", "direct-node"),
-                "bus_sysfs": "",
-                "is_physical": True,
-                "is_virtual": False,
-                "sysfs_path": "",
-                "is_capture": ioctl_info.get("is_capture", True),
-                "is_streaming": ioctl_info.get("is_streaming", True),
-            })
+# --------------------------------------------------------------------------- #
+# Device enumeration & classification
+# --------------------------------------------------------------------------- #
 
+def _usb_identity(device_path: str) -> Optional[Dict[str, str]]:
+    """Walks up from a sysfs device path to the USB device directory (the one with idVendor)."""
+    p = device_path
+    while p and p != "/" and "/usb" in p:
+        if os.path.exists(os.path.join(p, "idVendor")):
+            return {
+                "vid": _read(os.path.join(p, "idVendor")) or "",
+                "pid": _read(os.path.join(p, "idProduct")) or "",
+                "manufacturer": _read(os.path.join(p, "manufacturer")) or "",
+                "product": _read(os.path.join(p, "product")) or "",
+                "serial": _read(os.path.join(p, "serial")) or "",
+                "port_path": os.path.basename(p),
+                "speed_mbps": _read(os.path.join(p, "speed")) or "",
+            }
+        p = os.path.dirname(p)
+    return None
+
+
+def _pci_identity(device_path: str) -> Optional[Dict[str, str]]:
+    p = device_path
+    while p and p != "/":
+        if os.path.exists(os.path.join(p, "vendor")) and os.path.exists(os.path.join(p, "class")) and "/pci" in p:
+            return {"vendor": _read(os.path.join(p, "vendor")) or "", "device": _read(os.path.join(p, "device")) or "",
+                    "slot": os.path.basename(p)}
+        p = os.path.dirname(p)
+    return None
+
+
+def classify_video_node(sysfs_entry: str, dev_root: str = "/dev", ioctl_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Classifies one /sys/class/video4linux/videoN entry. `ioctl_info` can be injected for tests.
+    A node is a *physical camera* only if it is a video-capture node, it is not placed under
+    /sys/devices/virtual, it has a USB or PCI parent device, and no layer reports a known
+    software-camera driver.
+    """
+    name = os.path.basename(sysfs_entry)
+    node = os.path.join(dev_root, name)
+    card_name = _read(os.path.join(sysfs_entry, "name")) or ""
+    node_sysfs = os.path.realpath(sysfs_entry)
+    dev_link = os.path.join(sysfs_entry, "device")
+    parent = os.path.realpath(dev_link) if os.path.lexists(dev_link) else ""
+    drv_link = os.path.join(dev_link, "driver")
+    kernel_driver = os.path.basename(os.path.realpath(drv_link)) if os.path.lexists(drv_link) else ""
+
+    if parent and "/usb" in parent:
+        bus = "usb"
+    elif parent and "/devices/pci" in parent:
+        bus = "pci"
+    elif parent and "/devices/platform" in parent:
+        bus = "platform"
+    else:
+        bus = "none"
+
+    q = ioctl_info if ioctl_info is not None else _query_v4l2_ioctl(node)
+    drv = (q.get("driver") or "").lower()
+    bus_info = (q.get("bus_info") or "").lower()
+
+    reasons: List[str] = []
+    if "/devices/virtual/" in node_sysfs:
+        reasons.append("node registered under /sys/devices/virtual (no hardware parent)")
+    if not parent:
+        reasons.append("no parent hardware device in sysfs")
+    if drv in VIRTUAL_CAMERA_DRIVERS or kernel_driver.lower() in VIRTUAL_CAMERA_DRIVERS:
+        reasons.append(f"software camera driver '{q.get('driver') or kernel_driver}'")
+    if any(sig in bus_info for sig in ("loopback", "akvcam", "vivid", "vimc")):
+        reasons.append(f"software bus_info '{q.get('bus_info')}'")
+    if q.get("is_output") and q.get("is_capture"):
+        reasons.append("node accepts frames from user space (VIDEO_OUTPUT + VIDEO_CAPTURE)")
+
+    is_virtual = bool(reasons)
+    is_capture = bool(q.get("is_capture"))
+    is_physical = (not is_virtual) and is_capture and bus in ("usb", "pci")
+
+    usb = _usb_identity(parent) if bus == "usb" else None
+    pci = _pci_identity(parent) if bus == "pci" else None
+    if usb:
+        camera_id = f"usb-{usb['vid']}-{usb['pid']}-{usb['serial'] or usb['port_path']}"
+    elif pci:
+        camera_id = f"pci-{pci['vendor']}-{pci['device']}-{pci['slot']}"
+    else:
+        camera_id = f"{bus}-{name}"
+
+    return {
+        "node": node,
+        "name": card_name or q.get("card") or name,
+        "card": q.get("card") or card_name,
+        "driver": q.get("driver") or kernel_driver or "unknown",
+        "kernel_driver": kernel_driver,
+        "bus": bus,
+        "bus_info": q.get("bus_info") or "",
+        "bus_sysfs": parent,
+        "node_sysfs": node_sysfs,
+        "sysfs_path": sysfs_entry,
+        "is_capture": is_capture,
+        "is_metadata": bool(q.get("is_metadata")),
+        "is_streaming": bool(q.get("is_streaming")),
+        "device_caps": q.get("device_caps", 0),
+        "is_virtual": is_virtual,
+        "is_physical": is_physical,
+        "virtual_reasons": reasons,
+        "usb": usb,
+        "pci": pci,
+        "camera_id": re.sub(r"[^A-Za-z0-9._-]", "_", camera_id),
+        "ioctl_error": q.get("error"),
+    }
+
+
+def enumerate_video_devices(sysfs_root: str = "/sys", dev_root: str = "/dev", capture_only: bool = False) -> List[Dict[str, Any]]:
+    """Enumerates and classifies every V4L2 node on the host."""
+    entries = sorted(
+        glob.glob(os.path.join(sysfs_root, "class/video4linux/video*")),
+        key=lambda p: int(re.sub(r"\D", "", os.path.basename(p)) or 0),
+    )
+    devices = [classify_video_node(e, dev_root=dev_root) for e in entries]
+    if capture_only:
+        devices = [d for d in devices if d["is_capture"]]
     return devices
 
 
-def inspect_camera_hardware(device_node: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Performs comprehensive verification of the active camera hardware:
-    1. Inspects V4L2 device ioctl and physical bus binding (USB/PCI vs virtual loopback)
-    2. Scans loaded Linux kernel modules for loopback drivers (v4l2loopback, akvcam)
-    3. Scans running process table for injection/streaming software (OBS, DroidCam, etc.)
-    """
-    devices = enumerate_video_devices()
-    target_node = device_node or ("/dev/video0" if os.path.exists("/dev/video0") else (devices[0]["node"] if devices else "/dev/video0"))
+def scan_loaded_modules(proc_root: str = "/proc") -> List[str]:
+    found = []
+    text = _read(os.path.join(proc_root, "modules")) or ""
+    for line in text.splitlines():
+        mod = line.split(" ", 1)[0].lower()
+        if mod in VIRTUAL_CAMERA_MODULES:
+            found.append(mod)
+    return found
 
-    selected_dev = None
-    for d in devices:
-        if d["node"] == target_node:
-            selected_dev = d
-            break
-    if not selected_dev and devices:
-        selected_dev = devices[0]
 
-    # Check loaded kernel modules in /proc/modules
-    loaded_modules = set()
-    loopback_modules_found = []
-    suspicious_module_names = ["v4l2loopback", "akvcam", "vloopback", "vcam"]
+def scan_injection_processes(proc_root: str = "/proc", exclude_pids: Sequence[int] = ()) -> List[str]:
+    """Exact-name match on comm, regex match on cmdline. Unreadable processes are skipped."""
+    hits = []
     try:
-        if os.path.exists("/proc/modules"):
-            with open("/proc/modules", "r") as f:
-                for line in f:
-                    mod = line.split()[0].lower()
-                    loaded_modules.add(mod)
-                    if mod in suspicious_module_names:
-                        loopback_modules_found.append(mod)
-    except Exception:
-        pass
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()]
+    except OSError:
+        return hits
+    for pid in pids:
+        if int(pid) in exclude_pids:
+            continue
+        comm = (_read(os.path.join(proc_root, pid, "comm")) or "").lower()
+        if comm in INJECTION_PROCESS_NAMES:
+            hits.append(f"{comm} (PID {pid})")
+            continue
+        try:
+            with open(os.path.join(proc_root, pid, "cmdline"), "rb") as f:
+                cmd = f.read(4096).replace(b"\x00", b" ").decode("utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+        if any(p.search(cmd) for p in INJECTION_CMDLINE_PATTERNS):
+            hits.append(f"{comm or '?'} (PID {pid}): {cmd[:80].strip()}")
+    return hits
 
-    # Check active running processes for video injection software
-    suspicious_procs = []
-    target_proc_sigs = ["obs", "droidcam", "manycam", "v4l2loopback", "ffmpeg -f v4l2"]
-    my_pid = os.getpid()
-    try:
-        for entry in os.listdir("/proc"):
-            if entry.isdigit():
-                pid = int(entry)
-                if pid == my_pid:
-                    continue
-                comm_file = f"/proc/{entry}/comm"
-                try:
-                    with open(comm_file, "r") as f:
-                        comm = f.read().strip().lower()
-                        if any(sig in comm for sig in target_proc_sigs):
-                            suspicious_procs.append(f"{comm} (PID {pid})")
-                except (IOError, PermissionError):
-                    pass
-    except Exception:
-        pass
 
-    is_physical = selected_dev["is_physical"] if selected_dev else False
-    is_virtual = selected_dev["is_virtual"] if selected_dev else False
-    if loopback_modules_found or suspicious_procs:
-        is_virtual = True
+def inspect_camera_hardware(device_node: Optional[str] = None, sysfs_root: str = "/sys",
+                            dev_root: str = "/dev", proc_root: str = "/proc") -> Dict[str, Any]:
+    """Audits the selected capture node plus host-wide software-camera indicators."""
+    devices = enumerate_video_devices(sysfs_root, dev_root)
+    capture_devices = [d for d in devices if d["is_capture"]]
+    if device_node is None:
+        physical = [d for d in capture_devices if d["is_physical"]]
+        target = (physical or capture_devices or devices or [{"node": os.path.join(dev_root, "video0")}])[0]["node"]
+    else:
+        target = device_node
+    selected = next((d for d in devices if d["node"] == target), None)
+
+    modules = scan_loaded_modules(proc_root)
+    procs = scan_injection_processes(proc_root, exclude_pids=(os.getpid(),))
+    other_virtual = [d["node"] for d in devices if d["is_virtual"] and d["node"] != target]
 
     return {
-        "target_node": target_node,
-        "selected_device": selected_dev,
+        "target_node": target,
+        "selected_device": selected,
         "all_devices": devices,
-        "is_physical": is_physical,
-        "is_virtual": is_virtual,
-        "primary_card": selected_dev.get("card", "Unknown") if selected_dev else "None",
-        "primary_driver": selected_dev.get("driver", "Unknown") if selected_dev else "None",
-        "primary_bus": selected_dev.get("bus_info", "Unknown") if selected_dev else "None",
-        "sysfs_device_tree": selected_dev.get("bus_sysfs", "") if selected_dev else "",
-        "loopback_modules": loopback_modules_found,
-        "injection_processes": suspicious_procs,
+        "found": selected is not None,
+        "is_capture": bool(selected and selected["is_capture"]),
+        "is_physical": bool(selected and selected["is_physical"]),
+        "is_virtual": bool(selected and selected["is_virtual"]),
+        "camera_id": selected["camera_id"] if selected else None,
+        "primary_card": selected["card"] if selected else "None",
+        "primary_driver": selected["driver"] if selected else "None",
+        "primary_bus": selected["bus_info"] if selected else "None",
+        "sysfs_device_tree": selected["bus_sysfs"] if selected else "",
+        "loopback_modules": modules,
+        "injection_processes": procs,
+        "other_virtual_nodes": other_virtual,
     }
 
 
-def inspect_platform_and_hardware() -> Dict[str, Any]:
-    """
-    Inspects host motherboard DMI tables, CPU MSR flags, power supply subsystems,
-    and ACPI thermal zones to authenticate bare-metal execution on physical laptop hardware.
-    """
-    is_vm = False
-    vendor_found = "Bare Metal"
+# --------------------------------------------------------------------------- #
+# Platform & runtime
+# --------------------------------------------------------------------------- #
 
-    # 1. DMI System Identifiers
-    dmi_info: Dict[str, str] = {}
-    dmi_files = ["sys_vendor", "product_name", "product_version", "bios_vendor", "bios_version", "chassis_type"]
-    for dmi in dmi_files:
-        p = f"/sys/class/dmi/id/{dmi}"
-        if os.path.exists(p):
-            try:
-                with open(p, "r") as f:
-                    val = f.read().strip()
-                    dmi_info[dmi] = val
-                    val_lower = val.lower()
-                    for sig in HYPERVISOR_SIGNATURES:
-                        if sig in val_lower:
-                            is_vm = True
-                            vendor_found = f"Hypervisor DMI ({dmi}: {val})"
-                            break
-            except Exception:
-                pass
+def inspect_platform_and_hardware(sysfs_root: str = "/sys", proc_root: str = "/proc") -> Dict[str, Any]:
+    """Hypervisor / container detection plus descriptive platform telemetry."""
+    vm_reasons: List[str] = []
 
-    chassis_code = dmi_info.get("chassis_type", "")
-    chassis_desc = CHASSIS_TYPES.get(chassis_code, f"Chassis Code {chassis_code}" if chassis_code else "Standard System")
+    dmi: Dict[str, str] = {}
+    for key in ["sys_vendor", "product_name", "product_version", "bios_vendor", "bios_version", "chassis_type", "board_vendor"]:
+        val = _read(os.path.join(sysfs_root, "class/dmi/id", key))
+        if val is not None:
+            dmi[key] = val
+            low = val.lower()
+            sig = next((s for s in HYPERVISOR_SIGNATURES if re.search(rf"\b{re.escape(s)}\b", low)), None)
+            if sig and key != "chassis_type":
+                vm_reasons.append(f"DMI {key} = '{val}'")
 
-    # 2. CPU Hardware and Virtualization Flags
-    cpu_model = "Unknown CPU"
-    cpu_cores = 0
-    hypervisor_cpu_flag = False
-    if os.path.exists("/proc/cpuinfo"):
+    hyp_type = _read(os.path.join(sysfs_root, "hypervisor/type"))
+    if hyp_type:
+        vm_reasons.append(f"/sys/hypervisor/type = {hyp_type}")
+
+    cpu_model, threads, hypervisor_flag = "Unknown CPU", 0, False
+    cpuinfo = _read(os.path.join(proc_root, "cpuinfo")) or ""
+    for line in cpuinfo.splitlines():
+        key = line.split(":", 1)[0].strip()
+        if key == "processor":
+            threads += 1
+        elif key == "model name" and cpu_model == "Unknown CPU":
+            cpu_model = line.split(":", 1)[1].strip()
+        elif key == "flags" and not hypervisor_flag:
+            hypervisor_flag = "hypervisor" in line.split(":", 1)[1].split()
+    if hypervisor_flag:
+        vm_reasons.append("CPUID hypervisor bit set")
+
+    container_reasons = []
+    if os.path.exists("/.dockerenv"):
+        container_reasons.append("/.dockerenv present")
+    if os.path.exists("/run/.containerenv"):
+        container_reasons.append("/run/.containerenv present")
+    cgroup = _read(os.path.join(proc_root, "1/cgroup")) or ""
+    if re.search(r"(docker|kubepods|containerd|lxc)", cgroup):
+        container_reasons.append("PID 1 cgroup is a container cgroup")
+
+    battery = None
+    bats = sorted(glob.glob(os.path.join(sysfs_root, "class/power_supply/BAT*")))
+    if bats:
+        b = bats[0]
+        parts = [_read(os.path.join(b, k)) or "" for k in ("manufacturer", "model_name")]
+        battery = f"{' '.join(p for p in parts if p)} ({_read(os.path.join(b, 'capacity')) or '?'}%, {_read(os.path.join(b, 'status')) or '?'})".strip()
+
+    thermal = None
+    zones = sorted(glob.glob(os.path.join(sysfs_root, "class/thermal/thermal_zone*/temp")))
+    if zones:
         try:
-            with open("/proc/cpuinfo", "r") as f:
-                content = f.read()
-                lines = content.splitlines()
-                models = [l.split(":")[1].strip() for l in lines if "model name" in l]
-                flags = [l.split(":")[1].strip() for l in lines if "flags" in l]
-                cpu_cores = len([l for l in lines if "processor" in l])
-                if models:
-                    cpu_model = models[0]
-                if flags and "hypervisor" in flags[0].lower():
-                    hypervisor_cpu_flag = True
-                    is_vm = True
-                    vendor_found = "CPU hypervisor flag present"
-        except Exception:
-            pass
+            thermal = round(float(_read(zones[0]) or "nan") / 1000.0, 1)
+        except ValueError:
+            thermal = None
 
-    # 3. Container markers
-    is_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-    if is_container:
-        is_vm = True
-        vendor_found = "Containerized environment (Docker/LXC)"
-
-    # 4. Power Subsystem (Physical Battery Verification)
-    battery_detected = False
-    battery_details = "None detected"
-    battery_nodes = glob.glob("/sys/class/power_supply/BAT*")
-    if battery_nodes:
-        bat_p = battery_nodes[0]
-        try:
-            mfg = open(os.path.join(bat_p, "manufacturer")).read().strip() if os.path.exists(os.path.join(bat_p, "manufacturer")) else ""
-            model = open(os.path.join(bat_p, "model_name")).read().strip() if os.path.exists(os.path.join(bat_p, "model_name")) else ""
-            cap = open(os.path.join(bat_p, "capacity")).read().strip() if os.path.exists(os.path.join(bat_p, "capacity")) else ""
-            tech = open(os.path.join(bat_p, "technology")).read().strip() if os.path.exists(os.path.join(bat_p, "technology")) else ""
-            status = open(os.path.join(bat_p, "status")).read().strip() if os.path.exists(os.path.join(bat_p, "status")) else ""
-            battery_detected = True
-            battery_details = f"{mfg} {model} ({tech}, {cap}%, {status})".strip()
-        except Exception:
-            pass
-
-    # 5. ACPI Silicon Thermal Telemetry
-    thermal_temp_c: Optional[float] = None
-    thermal_nodes = glob.glob("/sys/class/thermal/thermal_zone*/temp")
-    if thermal_nodes:
-        try:
-            with open(thermal_nodes[0], "r") as f:
-                val = float(f.read().strip())
-                thermal_temp_c = round(val / 1000.0, 1)
-        except Exception:
-            pass
-
-    vendor_str = dmi_info.get("sys_vendor", "Generic Host")
-    product_str = dmi_info.get("product_version", dmi_info.get("product_name", "PC"))
-
+    is_vm = bool(vm_reasons)
+    is_container = bool(container_reasons)
     return {
-        "is_bare_metal": not is_vm,
+        "is_bare_metal": not (is_vm or is_container),
         "is_vm": is_vm,
         "is_container": is_container,
-        "vendor": vendor_str if not is_vm else vendor_found,
-        "product": product_str,
-        "bios": f"{dmi_info.get('bios_vendor', '')} {dmi_info.get('bios_version', '')}".strip(),
-        "chassis": chassis_desc,
-        "cpu_model": f"{cpu_model} ({cpu_cores} threads)",
-        "hypervisor_cpu_flag": hypervisor_cpu_flag,
-        "battery_detected": battery_detected,
-        "battery_summary": battery_details,
-        "thermal_temp_c": thermal_temp_c,
-        "dmi_raw": dmi_info,
+        "vm_reasons": vm_reasons,
+        "container_reasons": container_reasons,
+        "vendor": dmi.get("sys_vendor", "unknown"),
+        "product": dmi.get("product_version") or dmi.get("product_name", "unknown"),
+        "bios": f"{dmi.get('bios_vendor', '')} {dmi.get('bios_version', '')}".strip() or "unknown",
+        "chassis": CHASSIS_TYPES.get(dmi.get("chassis_type", ""), "unknown"),
+        "cpu_model": f"{cpu_model} ({threads} threads)",
+        "hypervisor_cpu_flag": hypervisor_flag,
+        "battery_detected": battery is not None,
+        "battery_summary": battery or "none",
+        "thermal_temp_c": thermal,
+        "dmi_raw": dmi,
     }
 
 
-def inspect_runtime_anti_tampering() -> Dict[str, Any]:
-    """
-    Validates process execution sandbox, anti-debugging markers, and dynamic linker integrity:
-    - TracerPid in /proc/self/status (detects ptrace/Frida/GDB/LLDB debugger hooks)
-    - LD_PRELOAD injection check
-    - Process EUID / EGID unprivileged sandbox
-    - Effective Linux capabilities (CapEff)
-    """
-    tracer_pid = 0
-    cap_eff = "0000000000000000"
-    try:
-        if os.path.exists("/proc/self/status"):
-            with open("/proc/self/status", "r") as f:
-                for line in f:
-                    if line.startswith("TracerPid:"):
-                        tracer_pid = int(line.split(":")[1].strip())
-                    elif line.startswith("CapEff:"):
-                        cap_eff = line.split(":")[1].strip()
-    except Exception:
-        pass
-
-    is_debugger_attached = (tracer_pid > 0)
+def inspect_runtime_anti_tampering(proc_root: str = "/proc") -> Dict[str, Any]:
+    """ptrace tracer, LD_PRELOAD injection, effective UID, effective capabilities."""
+    tracer_pid, cap_eff = 0, "unknown"
+    status = _read(os.path.join(proc_root, "self/status")) or ""
+    for line in status.splitlines():
+        if line.startswith("TracerPid:"):
+            tracer_pid = int(line.split(":")[1].strip() or 0)
+        elif line.startswith("CapEff:"):
+            cap_eff = line.split(":")[1].strip()
     ld_preload = os.environ.get("LD_PRELOAD")
-    is_injected = bool(ld_preload and ld_preload.strip())
-
-    uid = getattr(os, "geteuid", lambda: -1)()
-    is_root = (uid == 0)
-
-    su_paths = [
-        "/system/bin/su",
-        "/system/xbin/su",
-        "/sbin/su",
-        "/usr/bin/su",
-        "/usr/local/bin/su",
-    ]
-    su_found = [p for p in su_paths if os.path.exists(p)]
-
+    preload_file = _read("/etc/ld.so.preload")
+    uid = os.geteuid() if hasattr(os, "geteuid") else -1
+    su_found = [p for p in ANDROID_SU_PATHS if os.path.exists(p)]
     return {
         "tracer_pid": tracer_pid,
-        "is_debugger_attached": is_debugger_attached,
+        "is_debugger_attached": tracer_pid > 0,
         "ld_preload": ld_preload,
-        "is_injected": is_injected,
+        "ld_so_preload": preload_file or None,
+        "is_injected": bool((ld_preload and ld_preload.strip()) or (preload_file and preload_file.strip())),
         "uid": uid,
-        "is_root": is_root,
+        "is_root": uid == 0,
         "cap_eff": cap_eff,
-        "su_present": len(su_found) > 0,
+        "su_present": bool(su_found),
         "su_paths": su_found,
     }
 
 
 def probe_hypervisor() -> Dict[str, Any]:
-    """Backward compatibility wrapper returning hypervisor probe state."""
     plat = inspect_platform_and_hardware()
-    return {
-        "is_vm": plat["is_vm"],
-        "is_container": plat["is_container"],
-        "vendor": plat["vendor"],
-    }
+    return {"is_vm": plat["is_vm"], "is_container": plat["is_container"], "vendor": plat["vendor"]}
 
 
 def probe_privileges() -> Dict[str, Any]:
-    """Backward compatibility wrapper returning privilege probe state."""
-    tamp = inspect_runtime_anti_tampering()
-    return {
-        "is_root": tamp["is_root"],
-        "su_present": tamp["su_present"],
-        "su_paths": tamp["su_paths"],
-        "uid": tamp["uid"],
-    }
+    t = inspect_runtime_anti_tampering()
+    return {"is_root": t["is_root"], "su_present": t["su_present"], "su_paths": t["su_paths"], "uid": t["uid"]}
 
 
-def probe_host_integrity(target_camera_node: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Executes real-time live host integrity attestation directly on laptop hardware:
-    1. V4L2 Device & Bus Topology: queries driver, ioctl caps, USB/PCI root complex.
-    2. Platform & CPU Attestation: verifies bare-metal DMI, Ryzen/Intel MSRs, ACPI battery/thermal.
-    3. Runtime Process Anti-Tampering: verifies TracerPid=0, LD_PRELOAD clean, unprivileged user.
+# --------------------------------------------------------------------------- #
+# Passive host attestation (Gate 1a)
+# --------------------------------------------------------------------------- #
 
-    Complies with CEN/TS 18099 Gating Rules:
-    - Root / Debugger / VM -> BLOCK
-    - Virtual Camera Loopback -> FLAG_FOR_REVIEW
-    - Clean Physical Laptop Hardware -> PASS
-    """
+def probe_host_integrity(target_camera_node: Optional[str] = None, sysfs_root: str = "/sys",
+                         dev_root: str = "/dev", proc_root: str = "/proc") -> Dict[str, Any]:
+    """Runs all passive Layer 1 checks against the camera node that will be captured from."""
     t0 = time.perf_counter()
-
-    cam_audit = inspect_camera_hardware(target_camera_node)
-    plat_info = inspect_platform_and_hardware()
-    tamper_info = inspect_runtime_anti_tampering()
-
+    cam = inspect_camera_hardware(target_camera_node, sysfs_root, dev_root, proc_root)
+    plat = inspect_platform_and_hardware(sysfs_root, proc_root)
+    tamp = inspect_runtime_anti_tampering(proc_root)
     latency_ms = (time.perf_counter() - t0) * 1000.0
 
-    virtual_camera_detected = cam_audit["is_virtual"]
-    emulator_detected = plat_info["is_vm"] or plat_info["is_container"]
-    root_detected = tamper_info["is_root"]
-    debugger_detected = tamper_info["is_debugger_attached"] or tamper_info["is_injected"]
+    emulator = plat["is_vm"] or plat["is_container"]
+    debugger = tamp["is_debugger_attached"] or tamp["is_injected"]
+    root = tamp["is_root"]
+    sel = cam["selected_device"]
+    camera_not_physical = not cam["is_physical"]
+    host_context_flags = bool(cam["loopback_modules"] or cam["injection_processes"] or cam["other_virtual_nodes"])
 
-    # CEN/TS 18099 Gating Rules
-    if debugger_detected:
-        verdict = "BLOCK"
-        passed = False
-        blocked = True
-        reason = f"Runtime debugger/hooking detected (TracerPid={tamper_info['tracer_pid']}, LD_PRELOAD={tamper_info['ld_preload']})."
-    elif root_detected:
-        verdict = "BLOCK"
-        passed = False
-        blocked = True
-        reason = f"Privileged root execution detected on host environment (UID={tamper_info['uid']})."
-    elif emulator_detected:
-        verdict = "BLOCK"
-        passed = False
-        blocked = True
-        reason = f"Hypervisor / containerized environment detected ({plat_info['vendor']})."
-    elif virtual_camera_detected:
-        verdict = "FLAG_FOR_REVIEW"
-        passed = True
-        blocked = False
-        v_details = []
-        if cam_audit["loopback_modules"]:
-            v_details.append(f"Kernel loopback module: {','.join(cam_audit['loopback_modules'])}")
-        if cam_audit["injection_processes"]:
-            v_details.append(f"Injection processes: {','.join(cam_audit['injection_processes'])}")
-        if not cam_audit["is_physical"]:
-            v_details.append("Virtual V4L2 device node without USB/PCI backing")
-        reason = f"Virtual camera loopback detected ({'; '.join(v_details) or 'virtual driver'})."
+    if debugger:
+        verdict, reason = "BLOCK", (f"Runtime hooking detected (TracerPid={tamp['tracer_pid']}, "
+                                    f"LD_PRELOAD={tamp['ld_preload'] or tamp['ld_so_preload']}).")
+    elif emulator:
+        verdict, reason = "BLOCK", f"Virtualised execution environment: {'; '.join(plat['vm_reasons'] + plat['container_reasons'])}."
+    elif root:
+        verdict, reason = "BLOCK", "Capture process runs with effective UID 0 (root)."
+    elif camera_not_physical:
+        if not cam["found"]:
+            why = f"capture node {cam['target_node']} does not exist"
+        elif sel["is_virtual"]:
+            why = f"{sel['node']} is a software camera: {'; '.join(sel['virtual_reasons'])}"
+        elif not sel["is_capture"]:
+            why = f"{sel['node']} is not a video-capture node (device_caps=0x{sel['device_caps']:08x})"
+        else:
+            why = f"{sel['node']} has no USB/PCI hardware parent (bus={sel['bus']})"
+        verdict, reason = "BLOCK", f"Frame source is not a physical camera: {why}."
+    elif host_context_flags:
+        bits = []
+        if cam["loopback_modules"]:
+            bits.append(f"software-camera kernel modules loaded: {', '.join(cam['loopback_modules'])}")
+        if cam["other_virtual_nodes"]:
+            bits.append(f"other software camera nodes: {', '.join(cam['other_virtual_nodes'])}")
+        if cam["injection_processes"]:
+            bits.append(f"injection tooling running: {', '.join(cam['injection_processes'])}")
+        verdict, reason = "FLAG_FOR_REVIEW", "Selected camera is physical, but " + "; ".join(bits) + "."
     else:
-        verdict = "PASS"
-        passed = True
-        blocked = False
-        reason = (
-            f"Hardware verified clean on bare metal. {plat_info['vendor']} {plat_info['product']} | "
-            f"Camera: {cam_audit['primary_card']} ({cam_audit['primary_driver']} on {cam_audit['primary_bus']})."
-        )
+        verdict, reason = "PASS", (f"Physical camera {sel['card']} ({sel['driver']}, {sel['bus_info']}) on "
+                                   f"{plat['vendor']} {plat['product']}; no hooks, virtualisation or software cameras.")
 
-    # Granular diagnostic checklist for UI rendering
-    diagnostics_summary = [
-        {
-            "name": "Camera Driver & Physical Bus",
-            "status": "PASS" if (cam_audit["is_physical"] and not virtual_camera_detected) else ("WARN" if virtual_camera_detected else "FAIL"),
-            "value": f"{cam_audit['primary_card']} ({cam_audit['primary_driver']} on {cam_audit['primary_bus']})",
-            "details": "V4L2 ioctl verified driver bound to physical USB/PCIe root complex.",
-        },
-        {
-            "name": "Platform & Bare Metal DMI",
-            "status": "PASS" if not emulator_detected else "BLOCK",
-            "value": f"{plat_info['vendor']} {plat_info['product']} ({plat_info['chassis']})",
-            "details": f"BIOS: {plat_info['bios']}. No hypervisor CPU flags or VM artifacts.",
-        },
-        {
-            "name": "CPU & Hardware Silicon",
-            "status": "PASS" if not plat_info["hypervisor_cpu_flag"] else "BLOCK",
-            "value": plat_info["cpu_model"],
-            "details": "Bare-metal instruction execution confirmed without VM intercepts.",
-        },
-        {
-            "name": "Physical Power & Thermal Diodes",
-            "status": "PASS" if plat_info["battery_detected"] else "PASS",
-            "value": f"Battery: {plat_info['battery_summary']} • Thermal: {plat_info['thermal_temp_c']}°C",
-            "details": "Physical ACPI battery and hardware thermal sensors active (anti-emulator proof).",
-        },
-        {
-            "name": "Anti-Debugging & Linker Hooks",
-            "status": "PASS" if not debugger_detected else "BLOCK",
-            "value": f"TracerPid: {tamper_info['tracer_pid']} • LD_PRELOAD: {'Clean' if not tamper_info['is_injected'] else tamper_info['ld_preload']}",
-            "details": "No ptrace, GDB, Frida, or shared object injection hooks detected.",
-        },
-        {
-            "name": "Execution Privilege Sandbox",
-            "status": "PASS" if not root_detected else "BLOCK",
-            "value": f"UID: {tamper_info['uid']} • CapEff: {tamper_info['cap_eff']}",
-            "details": "Unprivileged user space execution without unauthorized root capability sets.",
-        },
+    def st(ok: bool, bad: str = "BLOCK") -> str:
+        return "PASS" if ok else bad
+
+    diagnostics = [
+        {"name": "Capture node is a physical camera", "status": st(not camera_not_physical),
+         "value": (f"{sel['node']}: {sel['card']} ({sel['driver']} on {sel['bus_info'] or sel['bus']})" if sel else cam["target_node"]),
+         "details": ("; ".join(sel["virtual_reasons"]) if sel and sel["virtual_reasons"]
+                     else (f"USB {sel['usb']['vid']}:{sel['usb']['pid']} {sel['usb']['product']} port {sel['usb']['port_path']}"
+                           if sel and sel.get("usb") else "")) or "-"},
+        {"name": "Software-camera modules / nodes", "status": st(not (cam["loopback_modules"] or cam["other_virtual_nodes"]), "WARN"),
+         "value": ", ".join(cam["loopback_modules"] + cam["other_virtual_nodes"]) or "none", "details": "/proc/modules, sysfs"},
+        {"name": "Injection tooling processes", "status": st(not cam["injection_processes"], "WARN"),
+         "value": ", ".join(cam["injection_processes"]) or "none", "details": "exact comm / cmdline match"},
+        {"name": "Bare-metal execution", "status": st(not emulator),
+         "value": f"{plat['vendor']} {plat['product']} ({plat['chassis']})",
+         "details": "; ".join(plat["vm_reasons"] + plat["container_reasons"]) or "no hypervisor bit, DMI or container markers"},
+        {"name": "Debugger / linker hooks", "status": st(not debugger),
+         "value": f"TracerPid={tamp['tracer_pid']}, LD_PRELOAD={tamp['ld_preload'] or 'unset'}", "details": "/proc/self/status, environ, /etc/ld.so.preload"},
+        {"name": "Privilege", "status": st(not root),
+         "value": f"EUID={tamp['uid']}, CapEff={tamp['cap_eff']}", "details": "capture should run unprivileged"},
+        {"name": "Platform telemetry (informational)", "status": "INFO",
+         "value": f"CPU {plat['cpu_model']}; battery {plat['battery_summary']}; thermal {plat['thermal_temp_c']} C",
+         "details": "descriptive only; not used for the verdict"},
     ]
 
     return {
-        "passed": passed,
-        "blocked": blocked,
-        "root_detected": root_detected,
-        "emulator_detected": emulator_detected,
-        "virtual_camera_detected": virtual_camera_detected,
-        "debugger_detected": debugger_detected,
-        "devices": cam_audit["all_devices"],
-        "camera_audit": cam_audit,
-        "hardware_telemetry": plat_info,
-        "anti_tampering": tamper_info,
-        "diagnostics_summary": diagnostics_summary,
-        "vm_info": {
-            "is_vm": plat_info["is_vm"],
-            "is_container": plat_info["is_container"],
-            "vendor": plat_info["vendor"],
-        },
-        "privileges": {
-            "is_root": tamper_info["is_root"],
-            "su_present": tamper_info["su_present"],
-            "su_paths": tamper_info["su_paths"],
-            "uid": tamper_info["uid"],
-        },
-        "latency_ms": round(latency_ms, 2),
+        "passed": verdict != "BLOCK",
+        "blocked": verdict == "BLOCK",
         "verdict": verdict,
         "details": reason,
+        "root_detected": root,
+        "emulator_detected": emulator,
+        "virtual_camera_detected": cam["is_virtual"] or bool(cam["loopback_modules"]),
+        "debugger_detected": debugger,
+        "camera_id": cam["camera_id"],
+        "devices": cam["all_devices"],
+        "camera_audit": cam,
+        "hardware_telemetry": plat,
+        "anti_tampering": tamp,
+        "diagnostics_summary": diagnostics,
+        "vm_info": {"is_vm": plat["is_vm"], "is_container": plat["is_container"], "vendor": plat["vendor"]},
+        "privileges": {"is_root": root, "su_present": tamp["su_present"], "su_paths": tamp["su_paths"], "uid": tamp["uid"]},
+        "latency_ms": round(latency_ms, 2),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Active sensor challenge (Gate 1b)
+# --------------------------------------------------------------------------- #
+
+CHALLENGE_CONFIG = {
+    "slots": 12,             # number of +/- slots (balanced)
+    "frames_per_slot": 4,
+    "min_sign_changes": 5,
+    "delta_fraction": 0.1,   # amplitude as a fraction of the control's range
+    "max_lag": 3,            # frames of pipeline latency tolerated
+    "min_corr": 0.9,         # partial correlation (luma vs command | trend) required
+    "min_effect": 6.0,       # grey levels between + and - slots required
+    "attempts": 2,           # a FAIL needs every attempt to fail
+}
+
+
+def make_challenge_sequence(slots: int, min_sign_changes: int, rng: Optional[random.Random] = None) -> List[int]:
+    rng = rng or random.SystemRandom()
+    base = [1] * (slots // 2) + [-1] * (slots - slots // 2)
+    while True:
+        seq = base[:]
+        rng.shuffle(seq)
+        if sum(1 for a, b in zip(seq, seq[1:]) if a != b) >= min_sign_changes:
+            return seq
+
+
+def analyze_challenge_response(luma: Sequence[float], command: Sequence[int], max_lag: int = 3,
+                               min_corr: float = 0.9, min_effect: float = 6.0) -> Dict[str, Any]:
+    """
+    Partial correlation between per-frame mean luma and the commanded +/-1 sequence,
+    controlling for a linear trend (auto-exposure drift), over 0..max_lag frames of latency.
+    Both series are residualised on [1, t] before correlating, so the trend fit cannot
+    absorb the commanded square wave.
+    """
+    l = np.asarray(luma, dtype=np.float64)
+    c = np.asarray(command, dtype=np.float64)
+    if len(l) < 8 or np.std(l) < 1e-9:
+        return {"passed": False, "corr": 0.0, "effect": 0.0, "lag": 0}
+    best = {"corr": -1.0, "effect": 0.0, "lag": 0}
+    for lag in range(0, max_lag + 1):
+        cc = c[: len(c) - lag] if lag else c
+        ll = l[lag:]
+        if np.std(cc) < 1e-9 or np.std(ll) < 1e-9:
+            continue
+        design = np.column_stack([np.ones(len(ll)), np.arange(len(ll), dtype=np.float64)])
+        proj = design @ np.linalg.pinv(design)
+        rl, rc = ll - proj @ ll, cc - proj @ cc
+        if np.std(rl) < 1e-9 or np.std(rc) < 1e-9:
+            continue
+        r = float(np.dot(rl, rc) / (np.linalg.norm(rl) * np.linalg.norm(rc)))
+        if r > best["corr"]:
+            best = {"corr": r, "effect": float(ll[cc > 0].mean() - ll[cc < 0].mean()), "lag": lag}
+    best["passed"] = best["corr"] >= min_corr and best["effect"] >= min_effect
+    best["corr"] = round(best["corr"], 3)
+    best["effect"] = round(best["effect"], 2)
+    return best
+
+
+def _center_luma(frame: np.ndarray) -> float:
+    h, w = frame.shape[:2]
+    roi = frame[h // 4: 3 * h // 4, w // 4: 3 * w // 4]
+    if roi.ndim == 3:
+        roi = roi.mean(axis=2)
+    return float(roi.mean())
+
+
+def run_sensor_challenge(device_node: str, read_frame: Callable[[], Optional[np.ndarray]],
+                         cfg: Optional[dict] = None, on_frame: Optional[Callable[[np.ndarray, int, int], None]] = None,
+                         rng: Optional[random.Random] = None) -> Dict[str, Any]:
+    """
+    Applies a random balanced +/- sequence to a hardware image control of `device_node`
+    (VIDIOC_S_CTRL) while reading frames with `read_frame` (the capture stream under test),
+    then restores the original value. Returns PASS / FAIL / UNSUPPORTED.
+    """
+    cfg = {**CHALLENGE_CONFIG, **(cfg or {})}
+    t0 = time.perf_counter()
+    controls = query_controls(device_node)
+    chosen = None
+    for cname, cid in CHALLENGE_CONTROLS:
+        ctl = next((v for v in controls.values() if v["id"] == cid), None)
+        if ctl and ctl["type"] == V4L2_CTRL_TYPE_INTEGER and not ctl["flags"] & (
+                V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_INACTIVE):
+            chosen = (cname, cid, ctl)
+            break
+    if chosen is None:
+        return {"verdict": "UNSUPPORTED", "passed": None, "control": None, "controls_available": sorted(controls),
+                "details": "No writable brightness/gamma/gain control on this node; challenge skipped.",
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1)}
+
+    cname, cid, ctl = chosen
+    try:
+        fd = os.open(device_node, os.O_RDWR | os.O_NONBLOCK)
+    except OSError as e:
+        return {"verdict": "UNSUPPORTED", "passed": None, "control": cname,
+                "details": f"Cannot open {device_node} for control access: {e.strerror}", "latency_ms": 0.0}
+
+    attempts = []
+    original = None
+    try:
+        original = _get_ctrl(fd, cid)
+        step = max(1, ctl["step"])
+        delta = max(step, int(round(cfg["delta_fraction"] * (ctl["max"] - ctl["min"]) / step)) * step)
+        hi = min(ctl["max"], original + delta)
+        lo = max(ctl["min"], original - delta)
+        if hi - lo < 2 * step:
+            return {"verdict": "UNSUPPORTED", "passed": None, "control": cname,
+                    "details": f"Control {cname} has no usable range around {original}.", "latency_ms": 0.0}
+        total = cfg["attempts"] * cfg["slots"] * cfg["frames_per_slot"]
+        k = 0
+        for _ in range(cfg["attempts"]):
+            seq = make_challenge_sequence(cfg["slots"], cfg["min_sign_changes"], rng)
+            luma, command = [], []
+            for s in seq:
+                _set_ctrl(fd, cid, hi if s > 0 else lo)
+                for _ in range(cfg["frames_per_slot"]):
+                    frame = read_frame()
+                    if frame is None:
+                        break
+                    luma.append(_center_luma(frame))
+                    command.append(s)
+                    k += 1
+                    if on_frame:
+                        on_frame(frame, k, total)
+            _set_ctrl(fd, cid, original)
+            res = analyze_challenge_response(luma, command, cfg["max_lag"], cfg["min_corr"], cfg["min_effect"])
+            res.update({"sequence": seq, "levels": [lo, hi], "frames": len(luma),
+                        "luma": [round(v, 2) for v in luma], "command": command})
+            attempts.append(res)
+            if res["passed"]:
+                break
+            for _ in range(3):  # let the sensor settle before a retry
+                read_frame()
+    except OSError as e:
+        return {"verdict": "UNSUPPORTED", "passed": None, "control": cname,
+                "details": f"VIDIOC_S_CTRL on {cname} failed: {e.strerror}", "latency_ms": 0.0}
+    finally:
+        if original is not None:
+            try:
+                _set_ctrl(fd, cid, original)
+            except OSError:
+                pass
+        os.close(fd)
+
+    passed = any(a["passed"] for a in attempts)
+    last = next((a for a in attempts if a["passed"]), attempts[-1])
+    return {
+        "verdict": "PASS" if passed else "FAIL",
+        "passed": passed,
+        "control": cname,
+        "original_value": original,
+        "levels": last["levels"],
+        "corr": last["corr"],
+        "effect": last["effect"],
+        "lag_frames": last["lag"],
+        "attempts": attempts,
+        "details": (f"Frames tracked a random {cname} challenge on {device_node} "
+                    f"(r={last['corr']:.2f}, effect={last['effect']:.1f} grey levels, lag={last['lag']} frames)."
+                    if passed else
+                    f"Frames did NOT respond to a {cname} challenge applied to {device_node} "
+                    f"(best r={last['corr']:.2f}, effect={last['effect']:.1f}): the stream is not produced by this sensor."),
+        "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+    }
+
+
+def capture_attested_frames(device_node: str, n_frames: int, width: int = 640, height: int = 480,
+                            fourcc: str = "MJPG", warmup_frames: int = 15, challenge: bool = True,
+                            on_frame: Optional[Callable[[np.ndarray, int, int, str], None]] = None) -> Dict[str, Any]:
+    """
+    Opens `device_node` (V4L2 backend, by path so the attested node is the captured node),
+    lets auto-exposure settle, runs the active sensor challenge on the same stream, then
+    captures `n_frames` raw frames for Layers 2 and 3. Frames are never re-encoded.
+    """
+    import cv2
+
+    out: Dict[str, Any] = {"frames": [], "challenge": None, "error": None, "node": device_node}
+    cap = cv2.VideoCapture(device_node, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        out["error"] = f"Could not open {device_node}"
+        return out
+    try:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+        def read() -> Optional[np.ndarray]:
+            ok, f = cap.read()
+            return f if ok else None
+
+        for i in range(warmup_frames):
+            f = read()
+            if f is not None and on_frame:
+                on_frame(f, i + 1, warmup_frames, "warmup")
+
+        if challenge:
+            out["challenge"] = run_sensor_challenge(
+                device_node, read,
+                on_frame=(lambda f, k, n: on_frame(f, k, n, "challenge")) if on_frame else None,
+            )
+            for _ in range(4):  # settle after restoring the control
+                read()
+
+        t0 = time.perf_counter()
+        for i in range(n_frames):
+            f = read()
+            if f is None:
+                break
+            out["frames"].append(f)
+            if on_frame:
+                on_frame(f, i + 1, n_frames, "capture")
+        dt = time.perf_counter() - t0
+        out["fps"] = round(len(out["frames"]) / dt, 2) if dt > 0 else 0.0
+        out["fourcc"] = int(cap.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode("ascii", errors="replace")
+        if out["frames"]:
+            out["height"], out["width"] = out["frames"][0].shape[:2]
+    finally:
+        cap.release()
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Client attestation payloads & simulation presets
+# --------------------------------------------------------------------------- #
+
+SIMULATION_PRESETS = {
+    "Clean Physical Device": dict(passed=True, blocked=False, root_detected=False, emulator_detected=False,
+                                  virtual_camera_detected=False, verdict="PASS",
+                                  details="Simulated: hardware verified clean."),
+    "Compromised / Rooted Android (Magisk/SU)": dict(passed=False, blocked=True, root_detected=True, emulator_detected=False,
+                                                     virtual_camera_detected=False, verdict="BLOCK",
+                                                     details="Simulated: root binary / Magisk detected."),
+    "Android Emulator (Goldfish/QEMU)": dict(passed=False, blocked=True, root_detected=False, emulator_detected=True,
+                                             virtual_camera_detected=False, verdict="BLOCK",
+                                             details="Simulated: AVD goldfish/ranchu markers detected."),
+    "Virtual Camera Injection (OBS / Hooked Driver)": dict(passed=False, blocked=True, root_detected=False, emulator_detected=False,
+                                                           virtual_camera_detected=True, verdict="BLOCK",
+                                                           details="Simulated: selected capture device is a software camera."),
+}
 
 
 def evaluate_client_attestation(payload: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Evaluates an attestation payload received from an Android client (Aarya's SDK)
-    or parses test simulation presets for automated regression testing.
+    Evaluates a JSON attestation payload from the Android SDK, or a named simulation preset.
+    Any other string falls back to a live probe of this host.
     """
     t0 = time.perf_counter()
+    if isinstance(payload, str) and payload.strip().startswith("{"):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError as e:
+            return {"passed": False, "blocked": True, "verdict": "BLOCK", "root_detected": False,
+                    "emulator_detected": False, "virtual_camera_detected": False, "latency_ms": 0.0,
+                    "details": f"Malformed attestation payload: {e}"}
 
-    # If payload is a dictionary from client JSON:
     if isinstance(payload, dict):
         root = bool(payload.get("isRooted", payload.get("root_detected", False)))
         emulator = bool(payload.get("isEmulator", payload.get("emulator_detected", False)))
         vcam = bool(payload.get("isVirtualCamera", payload.get("virtual_camera_detected", False)))
-        details = payload.get("details", "")
-
         if root or emulator:
             verdict = "BLOCK"
-            passed = False
-            blocked = True
         elif vcam:
+            # Android SDK treats camera enumeration anomalies as corroborating only (see VirtualCameraDetector.kt).
             verdict = "FLAG_FOR_REVIEW"
-            passed = True
-            blocked = False
         else:
             verdict = "PASS"
-            passed = True
-            blocked = False
+        return {"passed": verdict != "BLOCK", "blocked": verdict == "BLOCK", "verdict": verdict,
+                "root_detected": root, "emulator_detected": emulator, "virtual_camera_detected": vcam,
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+                "details": payload.get("details") or f"Client attestation payload evaluated: {verdict}."}
 
-        latency_ms = (time.perf_counter() - t0) * 1000.0
-        return {
-            "passed": passed,
-            "blocked": blocked,
-            "root_detected": root,
-            "emulator_detected": emulator,
-            "virtual_camera_detected": vcam,
-            "latency_ms": round(latency_ms, 2),
-            "verdict": verdict,
-            "details": details or f"Evaluated client attestation: verdict={verdict}",
-        }
+    if payload in SIMULATION_PRESETS:
+        return {**SIMULATION_PRESETS[payload], "simulated": True,
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2)}
 
-    # If payload is a JSON string
-    if isinstance(payload, str) and payload.strip().startswith("{"):
-        try:
-            parsed = json.loads(payload)
-            return evaluate_client_attestation(parsed)
-        except Exception:
-            pass
-
-    # Simulation presets (for unit tests & attack vector demonstration)
-    presets = {
-        "Clean Physical Device": {
-            "passed": True,
-            "blocked": False,
-            "root_detected": False,
-            "emulator_detected": False,
-            "virtual_camera_detected": False,
-            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-            "verdict": "PASS",
-            "details": "Hardware verified clean. No root binaries, hypervisor markers, or virtual cameras detected.",
-        },
-        "Compromised / Rooted Android (Magisk/SU)": {
-            "passed": False,
-            "blocked": True,
-            "root_detected": True,
-            "emulator_detected": False,
-            "virtual_camera_detected": False,
-            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-            "verdict": "BLOCK",
-            "details": "Root binary detected (su / Magisk / writable system partition). Device environment untrusted.",
-        },
-        "Android Emulator (Goldfish/QEMU)": {
-            "passed": False,
-            "blocked": True,
-            "root_detected": False,
-            "emulator_detected": True,
-            "virtual_camera_detected": False,
-            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-            "verdict": "BLOCK",
-            "details": "AVD hypervisor fingerprint detected (sdk_gphone / goldfish markers). High injection risk.",
-        },
-        "Virtual Camera Injection (OBS / Hooked Driver)": {
-            "passed": True,
-            "blocked": False,
-            "root_detected": False,
-            "emulator_detected": False,
-            "virtual_camera_detected": True,
-            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-            "verdict": "FLAG_FOR_REVIEW",
-            "details": "Virtual camera enumeration anomaly detected. Flagged for secondary PRNU confirmation.",
-        },
-    }
-
-    if payload in presets:
-        return presets[payload]
-
-    # Default fallback: run real live hardware probe
     return probe_host_integrity()
 
 
 def probe_uploaded_file_provenance(video_path: str) -> Dict[str, Any]:
     """
-    Evaluates origin provenance for a standalone uploaded video file:
-    - Inspects container format, streams, and encoder tags (e.g. FFmpeg/Lavf vs native hardware encoders).
-    - Transparently documents that without an active client attestation session, device environment is UNATTESTED.
-    - Defers definitive physical authenticity verification to Gate 2 (PRNU) and Gate 3 (Temporal dynamics).
+    A file has no live device to attest. Container metadata is reported for context only
+    (it is trivially editable), and the session is marked UNATTESTED_ORIGIN.
     """
     t0 = time.perf_counter()
-    encoder = "Unknown"
-    is_software = False
-
-    cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
-        "-show_format", "-show_streams", video_path,
-    ]
+    meta: Dict[str, Any] = {}
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+        res = subprocess.run(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", video_path],
+                             capture_output=True, text=True, timeout=5.0)
         if res.returncode == 0:
             meta = json.loads(res.stdout)
-            tags = meta.get("format", {}).get("tags", {})
-            encoder = tags.get("encoder", tags.get("compatible_brands", "Unknown"))
-            is_software = any(s in str(encoder).lower() for s in ["lavf", "ffmpeg", "handbrake", "obs", "premiere", "python"])
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         pass
-
-    latency_ms = (time.perf_counter() - t0) * 1000.0
-
+    tags = {k.lower(): v for k, v in (meta.get("format", {}).get("tags", {}) or {}).items()}
+    encoder = tags.get("encoder", "")
+    device_tags = {k: v for k, v in tags.items() if any(s in k for s in ("make", "model", "com.apple", "com.android"))}
+    software = any(s in encoder.lower() for s in ("lavf", "ffmpeg", "handbrake", "obs", "premiere", "davinci"))
     return {
         "passed": True,
         "blocked": False,
+        "verdict": "UNATTESTED_ORIGIN",
         "root_detected": False,
         "emulator_detected": False,
-        "virtual_camera_detected": is_software,
+        "virtual_camera_detected": False,
         "is_file_upload": True,
-        "encoder": encoder,
-        "is_software_encoder": is_software,
-        "latency_ms": round(latency_ms, 2),
-        "verdict": "UNATTESTED_ORIGIN" if not is_software else "FLAG_FOR_REVIEW",
-        "details": (
-            f"Standalone video upload: no live client attestation payload attached. "
-            f"Container encoder: '{encoder}'. Defers to Gate 2 (PRNU sensor noise) and Gate 3 (Temporal forensics)."
-        ),
+        "encoder": encoder or "not recorded",
+        "is_software_encoder": software,
+        "device_tags": device_tags,
+        "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "details": (f"Uploaded file: no live device to attest. Container encoder '{encoder or 'not recorded'}'"
+                    f"{' (software re-encode)' if software else ''}"
+                    f"{'; device tags ' + json.dumps(device_tags) if device_tags else ''}. Metadata is informational only."),
     }

@@ -1,0 +1,378 @@
+{
+  "generated": 1791211371.696035,
+  "n_webcam_sessions": 11,
+  "n_corpus_clips": 98,
+  "corpus_groups": {
+    "real: phone WhatsApp (VISION)": 12,
+    "real: phone native (VISION)": 22,
+    "fake: reenactment (DF40)": 8,
+    "fake: face-swap (DF40)": 28,
+    "fake: talking-head (DF40)": 12,
+    "fake: text-to-video": 16
+  },
+  "gate1_latency_ms": {
+    "n": 20,
+    "min": 9.29,
+    "median": 9.46,
+    "max": 11.68
+  },
+  "reference": {
+    "usb-5986-216a-1-3 1280x720": {
+      "sessions": 2,
+      "genuine_pce": {
+        "n": 2,
+        "min": 3418.21,
+        "median": 3785.36,
+        "max": 4152.51
+      },
+      "genuine_accept_rate": 1.0,
+      "impostor_pce": {
+        "n": 36,
+        "min": 0.41,
+        "median": 3.35,
+        "max": 16.9
+      },
+      "impostor_accept_rate": 0.0,
+      "impostor_by_group": {
+        "real: phone native (VISION)": {
+          "n": 20,
+          "min": 0.41,
+          "median": 3.88,
+          "max": 16.9
+        },
+        "fake: face-swap (DF40)": {
+          "n": 1,
+          "min": 1.63,
+          "median": 1.63,
+          "max": 1.63
+        },
+        "fake: talking-head (DF40)": {
+          "n": 5,
+          "min": 1.34,
+          "median": 3.07,
+          "max": 3.43
+        },
+        "fake: text-to-video": {
+          "n": 10,
+          "min": 1.35,
+          "median": 3.06,
+          "max": 5.01
+        }
+      },
+      "impostor_accept_by_group": {
+        "real: phone native (VISION)": 0,
+        "fake: face-swap (DF40)": 0,
+        "fake: talking-head (DF40)": 0,
+        "fake: text-to-video": 0
+      },
+      "replay_pce": {
+        "x264-crf23": {
+          "n": 1,
+          "min": 175.82,
+          "median": 175.82,
+          "max": 175.82
+        },
+        "x264-crf32": {
+          "n": 1,
+          "min": 107.52,
+          "median": 107.52,
+          "max": 107.52
+        },
+        "mp4v": {
+          "n": 1,
+          "min": 385.43,
+          "median": 385.43,
+          "max": 385.43
+        }
+      },
+      "replay_accept_rate": {
+        "x264-crf23": 1.0,
+        "x264-crf32": 1.0,
+        "mp4v": 1.0
+      },
+      "attack_pce": {
+        "photo re-animation of a genuine frame": {
+          "n": 1,
+          "min": 15.89,
+          "median": 15.89,
+          "max": 15.89
+        },
+        "static replay of a genuine frame": {
+          "n": 1,
+          "min": 552.15,
+          "median": 552.15,
+          "max": 552.15
+        }
+      },
+      "attack_accept_rate": {
+        "photo re-animation of a genuine frame": 0.0,
+        "static replay of a genuine frame": 1.0
+      },
+      "latency_ms_per_test": {
+        "n": 2,
+        "min": 847.15,
+        "median": 852.28,
+        "max": 857.41
+      }
+    },
+    "usb-5986-216a-1-3 640x480": {
+      "sessions": 8,
+      "genuine_pce": {
+        "n": 56,
+        "min": 1101.53,
+        "median": 7480.44,
+        "max": 21227.37
+      },
+      "genuine_accept_rate": 1.0,
+      "impostor_pce": {
+        "n": 64,
+        "min": 0.67,
+        "median": 3.7,
+        "max": 17.43
+      },
+      "impostor_accept_rate": 0.0,
+      "impostor_by_group": {
+        "real: phone WhatsApp (VISION)": {
+          "n": 12,
+          "min": 1.84,
+          "median": 5.1,
+          "max": 14.82
+        },
+        "real: phone native (VISION)": {
+          "n": 22,
+          "min": 0.67,
+          "median": 3.98,
+          "max": 14.79
+        },
+        "fake: face-swap (DF40)": {
+          "n": 8,
+          "min": 1.09,
+          "median": 2.33,
+          "max": 10.62
+        },
+        "fake: talking-head (DF40)": {
+          "n": 6,
+          "min": 0.84,
+          "median": 2.25,
+          "max": 4.04
+        },
+        "fake: text-to-video": {
+          "n": 16,
+          "min": 1.51,
+          "median": 3.29,
+          "max": 17.43
+        }
+      },
+      "impostor_accept_by_group": {
+        "real: phone WhatsApp (VISION)": 0,
+        "real: phone native (VISION)": 0,
+        "fake: face-swap (DF40)": 0,
+        "fake: talking-head (DF40)": 0,
+        "fake: text-to-video": 0
+      },
+      "replay_pce": {
+        "x264-crf23": {
+          "n": 7,
+          "min": 920.47,
+          "median": 3723.91,
+          "max": 7201.94
+        },
+        "x264-crf32": {
+          "n": 7,
+          "min": 227.24,
+          "median": 870.25,
+          "max": 1823.8
+        },
+        "mp4v": {
+          "n": 7,
+          "min": 1816.35,
+          "median": 6515.57,
+          "max": 12467.11
+        }
+      },
+      "replay_accept_rate": {
+        "x264-crf23": 1.0,
+        "x264-crf32": 1.0,
+        "mp4v": 1.0
+      },
+      "attack_pce": {
+        "photo re-animation of a genuine frame": {
+          "n": 7,
+          "min": 8.31,
+          "median": 24.37,
+          "max": 40.76
+        },
+        "static replay of a genuine frame": {
+          "n": 7,
+          "min": 1087.89,
+          "median": 3632.3,
+          "max": 9422.06
+        }
+      },
+      "attack_accept_rate": {
+        "photo re-animation of a genuine frame": 0.0,
+        "static replay of a genuine frame": 1.0
+      },
+      "latency_ms_per_test": {
+        "n": 56,
+        "min": 187.42,
+        "median": 195.64,
+        "max": 204.38
+      }
+    }
+  },
+  "blind": {
+    "45": {
+      "attack: photo re-animation": {
+        "ABSENT": 3
+      },
+      "attack: static replay": {
+        "INCONCLUSIVE": 3
+      },
+      "fake: face-swap (DF40)": {
+        "ABSENT": 2,
+        "INCONCLUSIVE": 15,
+        "PRESENT": 11
+      },
+      "fake: reenactment (DF40)": {
+        "INCONCLUSIVE": 5,
+        "ABSENT": 3
+      },
+      "fake: talking-head (DF40)": {
+        "INCONCLUSIVE": 9,
+        "ABSENT": 1,
+        "PRESENT": 2
+      },
+      "fake: text-to-video": {
+        "ABSENT": 4,
+        "PRESENT": 3,
+        "INCONCLUSIVE": 9
+      },
+      "real: phone WhatsApp (VISION)": {
+        "ABSENT": 6,
+        "INCONCLUSIVE": 6
+      },
+      "real: phone native (VISION)": {
+        "ABSENT": 16,
+        "INCONCLUSIVE": 5,
+        "PRESENT": 1
+      },
+      "real: webcam (this machine)": {
+        "INCONCLUSIVE": 9,
+        "PRESENT": 2
+      }
+    },
+    "90": {
+      "attack: photo re-animation": {
+        "INCONCLUSIVE": 2,
+        "ABSENT": 1
+      },
+      "attack: static replay": {
+        "INCONCLUSIVE": 3
+      },
+      "fake: face-swap (DF40)": {
+        "ABSENT": 4,
+        "PRESENT": 16,
+        "INCONCLUSIVE": 8
+      },
+      "fake: reenactment (DF40)": {
+        "ABSENT": 3,
+        "INCONCLUSIVE": 5
+      },
+      "fake: talking-head (DF40)": {
+        "PRESENT": 4,
+        "INCONCLUSIVE": 7,
+        "ABSENT": 1
+      },
+      "fake: text-to-video": {
+        "ABSENT": 3,
+        "PRESENT": 7,
+        "INCONCLUSIVE": 6
+      },
+      "real: phone WhatsApp (VISION)": {
+        "ABSENT": 9,
+        "INCONCLUSIVE": 3
+      },
+      "real: phone native (VISION)": {
+        "ABSENT": 16,
+        "INCONCLUSIVE": 2,
+        "PRESENT": 4
+      },
+      "real: webcam (this machine)": {
+        "INCONCLUSIVE": 9,
+        "PRESENT": 2
+      }
+    }
+  },
+  "challenge_null": {
+    "traces": 109,
+    "trials": 32700,
+    "false_passes": 0,
+    "false_pass_rate": 0.0,
+    "rule_of_three_upper_95": 9.174311926605505e-05,
+    "null_corr_p99": 0.622,
+    "null_corr_max": 0.813,
+    "config": {
+      "slots": 12,
+      "frames_per_slot": 4,
+      "min_corr": 0.9,
+      "min_effect": 6.0,
+      "max_lag": 3,
+      "attempts": 2
+    }
+  },
+  "challenge_live": {
+    "node": "/dev/video0",
+    "trials": 20,
+    "genuine_pass": 20,
+    "corr": {
+      "n": 20,
+      "min": 1.0,
+      "median": 1.0,
+      "max": 1.0
+    },
+    "effect_grey_levels": {
+      "n": 20,
+      "min": 48.63,
+      "median": 48.75,
+      "max": 49.04
+    },
+    "latency_ms": {
+      "n": 20,
+      "min": 1579.5,
+      "median": 1580.65,
+      "max": 1583.0
+    },
+    "replay_trials": 11,
+    "replay_rejected": 11
+  },
+  "temporal": {
+    "fake: face-swap (DF40)": {
+      "passed": 28
+    },
+    "fake: reenactment (DF40)": {
+      "passed": 8
+    },
+    "fake: talking-head (DF40)": {
+      "passed": 12
+    },
+    "fake: text-to-video": {
+      "passed": 7,
+      "abstained": 7,
+      "flagged": 2
+    },
+    "real: phone WhatsApp (VISION)": {
+      "abstained": 9,
+      "passed": 3
+    },
+    "real: phone native (VISION)": {
+      "abstained": 8,
+      "flagged": 3,
+      "passed": 11
+    },
+    "real: webcam (this machine)": {
+      "abstained": 9,
+      "passed": 2
+    }
+  }
+}

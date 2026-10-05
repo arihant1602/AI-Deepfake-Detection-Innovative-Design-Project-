@@ -1,5 +1,7 @@
 # Layer 5: Forensic Verification Portal & Gated Fusion Engine
 
+> **Note (Oct 2026):** superseded by [ARCHITECTURE.md](ARCHITECTURE.md), which documents the current gating rules (virtual capture device and failed sensor challenge now BLOCK; blind PRNU is advisory; files can never be labelled an authentic live stream).
+
 **Component:** Layer 5 (Frontend & Integration Orchestrator)  
 **Architecture:** CEN/TS 18099 Gated Presentation Attack & Injection Detection  
 **Target Latency:** Sub-5 seconds end-to-end verification
