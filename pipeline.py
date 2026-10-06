@@ -3,9 +3,9 @@ Gated Verification Pipeline & Orchestration Engine (Layer 5)
 ============================================================
 Sequential, fail-fast fusion of
   Gate 1  host & camera attestation (passive probe + active sensor challenge)
-  Gate 2  camera sensor noise (PRNU) - enrolled-reference match bound to the Gate 1
-          camera identity; blind motion-gated test when no reference exists (advisory)
-  Gate 3  temporal consistency & frequency analysis
+  Gate 2  live sensor noise - blind test for fresh, sensor-like noise with no codec
+          fingerprint (enforced in live sessions; advisory for files)
+  Gate 3  face deepfake detection (GenD, WACV 2026) on aligned face crops
 
 Cheap gates run first and terminate the session as soon as a definitive anomaly is
 found, so the expensive pixel analysis is only spent on sessions that survive.
@@ -29,8 +29,7 @@ import host_integrity
 
 try:
     from camera_sensor_noise_profiling import (
-        CameraSensorNoiseProfiler, FingerprintStore, read_video_frames,
-        VERDICT_INCONCLUSIVE, VERDICT_PRESENT,
+        CameraSensorNoiseProfiler, read_video_frames, VERDICT_INCONCLUSIVE, VERDICT_PRESENT,
     )
     HAS_LAYER_2 = True
     prnu_profiler = CameraSensorNoiseProfiler()
@@ -46,8 +45,8 @@ except ImportError:
     HAS_LAYER_3 = False
     temporal_analyzer = None
 
-DEFAULT_FINGERPRINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fingerprints")
-MIN_TEMPORAL_FACE_FRAMES = 8  # Layer 3 abstains below this many face frames
+MIN_TEMPORAL_FACE_FRAMES = 8  # legacy temporal heuristic abstains below this many face frames
+_deepfake_detector = None
 
 VERDICT_AUTHENTIC = "AUTHENTIC LIVE STREAM"
 VERDICT_NO_ANOMALY = "NO ANOMALY DETECTED"
@@ -162,12 +161,13 @@ def check_sensor_noise(
     frames: Optional[Sequence[np.ndarray]] = None,
     ref_fingerprint: Optional[np.ndarray] = None,
     max_frames: int = 90,
+    enforce: bool = False,
 ) -> Dict[str, Any]:
     """
-    Runs Layer 2. With a reference fingerprint the result is *enforced* (a mismatch
-    terminates the session). Without one, the blind test is advisory only: on real
-    in-the-wild video it cannot separate camera PRNU from generator/codec fingerprints
-    reliably enough to block (see docs/ARCHITECTURE.md, Section 6).
+    Runs Layer 2. The default blind live-noise test is enforced when `enforce` is set
+    (live sessions): ABSENT terminates the session. For files it is advisory, because any
+    encoded video lacks live sensor noise by construction. A reference fingerprint, when
+    given, is always enforced.
     """
     if not HAS_LAYER_2 or prnu_profiler is None:
         return {"passed": True, "enforced": False, "verdict": "UNAVAILABLE", "mode": None, "score": None,
@@ -191,7 +191,7 @@ def check_sensor_noise(
     latency_ms = (time.perf_counter() - t0) * 1000.0
 
     c = res.components
-    enforced = res.mode == "reference" and res.verdict != VERDICT_INCONCLUSIVE
+    enforced = res.verdict != VERDICT_INCONCLUSIVE and (res.mode == "reference" or enforce)
     return {
         "passed": not (enforced and res.flagged),
         "enforced": enforced,
@@ -202,9 +202,11 @@ def check_sensor_noise(
         "score": res.score,
         "confidence": res.confidence,
         "pce_score": c.get("pce_score"),
-        "z_score": c.get("z_score"),
-        "rho": c.get("rho"),
-        "changed_fraction": c.get("changed_fraction"),
+        "noise_sigma": c.get("noise_sigma"),
+        "exact_repeat": c.get("exact_repeat"),
+        "spatial_corr": c.get("spatial_corr"),
+        "colour_corr": c.get("colour_corr"),
+        "failed_checks": c.get("failed_checks"),
         "frames_analyzed": res.frames_analyzed,
         "latency_ms": round(latency_ms, 1),
         "explanation": res.explanation,
@@ -246,6 +248,43 @@ def check_temporal_coherence(video_path: Optional[str] = None, frames: Optional[
     }
 
 
+def get_deepfake_detector():
+    """GenD detector, loaded once per process (~6 s, ~1.2 GB GPU memory). Returns the error if unavailable."""
+    global _deepfake_detector
+    if _deepfake_detector is None:
+        try:
+            import deepfake_detector as dd
+            _deepfake_detector = dd.DeepfakeDetector(dd.CONFIG["backbone"])
+        except Exception as e:  # torch / weights / GPU missing: Gate 3 abstains instead of crashing
+            _deepfake_detector = e
+    return _deepfake_detector
+
+
+def check_deepfake(video_path: Optional[str] = None, frames: Optional[Sequence[np.ndarray]] = None,
+                   max_frames: int = 90) -> Dict[str, Any]:
+    """Gate 3: GenD face-deepfake probability averaged over aligned face crops."""
+    det = get_deepfake_detector()
+    if isinstance(det, Exception):
+        return {"passed": True, "abstained": True, "score": None, "frames_with_face": 0, "frames_analyzed": 0,
+                "model": "GenD (unavailable)", "explanation": f"Deepfake model unavailable: {det}"}
+    if frames is None:
+        frames = load_frames(video_path, max_frames)
+    r = det.analyze_frames(frames)
+    return {
+        "passed": not r.flagged,
+        "abstained": r.abstained,
+        "score": r.fake_probability,
+        "threshold": det.cfg["fake_threshold"],
+        "frames_with_face": r.frames_with_face,
+        "frames_analyzed": r.frames_analyzed,
+        "frame_probabilities": r.frame_probabilities,
+        "model": f"GenD {det.cfg['backbone'].upper()}",
+        "latency_ms": r.latency_ms,
+        "explanation": r.explanation,
+        "raw_result": r,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Fusion
 # --------------------------------------------------------------------------- #
@@ -262,14 +301,13 @@ def _fuse(hw: Dict[str, Any], challenge: Optional[Dict[str, Any]], prnu: Dict[st
         limits.append("file input: no live sensor challenge possible, so liveness of the source is not proven")
     elif not challenge or challenge.get("verdict") != "PASS":
         limits.append("active sensor challenge not performed / unsupported by this camera")
-    if prnu.get("mode") != "reference" or prnu.get("verdict") != VERDICT_PRESENT:
-        if prnu.get("mode") == "blind":
-            limits.append(f"no enrolled sensor fingerprint: PRNU blind test is advisory only (result {prnu.get('verdict')})")
+    if prnu.get("verdict") != VERDICT_PRESENT:
+        if not live and prnu.get("mode") == "live_noise":
+            limits.append(f"file input: sensor-noise result is advisory ({prnu.get('verdict')}; any encoded video lacks live noise)")
         else:
-            limits.append(f"PRNU not verified ({prnu.get('verdict')})")
+            limits.append(f"live sensor noise not confirmed ({prnu.get('verdict')})")
     if temporal.get("abstained"):
-        limits.append(f"Gate 3 abstained (face found in {temporal.get('frames_with_face', 0)} frames, "
-                      f"needs {MIN_TEMPORAL_FACE_FRAMES})")
+        limits.append(f"Gate 3 abstained ({temporal.get('explanation') or 'no face'})")
     verdict = VERDICT_AUTHENTIC if (live and not limits) else VERDICT_NO_ANOMALY
     return {"verdict": verdict, "limitations": limits}
 
@@ -305,7 +343,7 @@ def run_detection_pipeline(
     if not prnu["passed"]:
         return {"verdict": VERDICT_INJECTION_PRNU, "gate": 2, "details": prnu, "attestation": hw, "timings": timings}
 
-    temporal = check_temporal_coherence(frames=frames)
+    temporal = check_deepfake(frames=frames)
     timings["gate3_ms"] = temporal.get("latency_ms", 0.0)
     if not temporal["passed"]:
         return {"verdict": VERDICT_DEEPFAKE, "gate": 3, "details": temporal, "attestation": hw, "prnu": prnu,
@@ -330,7 +368,6 @@ def run_live_session(
     height: int = 480,
     fourcc: str = "MJPG",
     attestation_mode: Optional[Union[str, Dict[str, Any]]] = None,
-    fingerprint_dir: str = DEFAULT_FINGERPRINT_DIR,
     on_frame: Optional[Callable[[np.ndarray, int, int, str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -338,8 +375,7 @@ def run_live_session(
       1. passive Gate 1 probe of `camera_node` (BLOCK => the camera is never opened)
       2. open the node, warm up, run the active sensor challenge on the same stream (FAIL => BLOCK)
       3. capture `n_frames` raw frames
-      4. Gate 2 against the fingerprint enrolled for this physical camera + mode (enforced),
-         or the blind advisory test if none is enrolled
+      4. Gate 2 live sensor-noise test on the raw frames (enforced)
       5. Gate 3 on the same raw frames
     """
     t0 = time.perf_counter()
@@ -370,19 +406,14 @@ def run_live_session(
         return {"verdict": "ERROR", "gate": None, "details": {"explanation": f"Only {len(frames)} frames captured."},
                 "timings": timings, "frames_bgr": frames}
 
-    store = FingerprintStore(fingerprint_dir)
-    h, w = frames[0].shape[:2]
-    camera_id = hw.get("camera_id")
-    ref = store.load(camera_id, w, h) if camera_id else None
-    prnu = check_sensor_noise(frames=frames, ref_fingerprint=ref)
-    prnu["camera_id"] = camera_id
-    prnu["sensor_mode"] = f"{w}x{h}"
+    prnu = check_sensor_noise(frames=frames, enforce=True)
+    prnu["camera_id"] = hw.get("camera_id")
     timings["gate2_ms"] = prnu.get("latency_ms", 0.0)
     if not prnu["passed"]:
         return {"verdict": VERDICT_INJECTION_PRNU, "gate": 2, "details": prnu, "attestation": {**hw, "challenge": challenge},
                 "timings": timings, "frames_bgr": frames}
 
-    temporal = check_temporal_coherence(frames=frames)
+    temporal = check_deepfake(frames=frames)
     timings["gate3_ms"] = temporal.get("latency_ms", 0.0)
     if not temporal["passed"]:
         return {"verdict": VERDICT_DEEPFAKE, "gate": 3, "details": temporal, "attestation": {**hw, "challenge": challenge},
@@ -400,42 +431,6 @@ def run_live_session(
         "details": {"attestation": {**hw, "challenge": challenge}, "prnu": prnu, "temporal": temporal},
         "timings": timings,
     }
-
-
-def enroll_live_camera(
-    camera_node: str,
-    n_frames: int = 150,
-    width: int = 640,
-    height: int = 480,
-    fourcc: str = "MJPG",
-    fingerprint_dir: str = DEFAULT_FINGERPRINT_DIR,
-    on_frame: Optional[Callable[[np.ndarray, int, int, str], None]] = None,
-) -> Dict[str, Any]:
-    """
-    Enrolls the PRNU fingerprint of the physical camera behind `camera_node`. Refuses to
-    enroll unless Gate 1 passes and the sensor answers the active challenge, so a
-    software camera can never be enrolled as trusted.
-    """
-    hw = host_integrity.probe_host_integrity(target_camera_node=camera_node)
-    if hw["blocked"]:
-        return {"enrolled": False, "reason": f"Gate 1 blocked: {hw['details']}", "attestation": hw}
-    cap = host_integrity.capture_attested_frames(camera_node, n_frames, width, height, fourcc, on_frame=on_frame)
-    if cap.get("error"):
-        return {"enrolled": False, "reason": cap["error"], "attestation": hw}
-    ch = cap.get("challenge") or {}
-    if ch.get("verdict") == "FAIL":
-        return {"enrolled": False, "reason": f"Sensor challenge failed: {ch.get('details')}", "attestation": hw}
-    frames = cap["frames"]
-    if len(frames) < 60:
-        return {"enrolled": False, "reason": f"Only {len(frames)} frames captured (need >= 60).", "attestation": hw}
-    fp = prnu_profiler.estimate_fingerprint_from_frames(frames)
-    store = FingerprintStore(fingerprint_dir)
-    path = store.save(hw["camera_id"], fp, {
-        "frames": len(frames), "node": camera_node, "card": hw["camera_audit"]["primary_card"],
-        "fourcc": cap.get("fourcc"), "challenge": ch.get("verdict"),
-    })
-    return {"enrolled": True, "path": path, "camera_id": hw["camera_id"], "sensor_mode": f"{fp.shape[1]}x{fp.shape[0]}",
-            "frames": len(frames), "challenge": ch, "attestation": hw}
 
 
 # --------------------------------------------------------------------------- #
@@ -457,7 +452,6 @@ if __name__ == "__main__":
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--video", help="Video file to analyse")
     src.add_argument("--live", metavar="NODE", help="Run a live session on a V4L2 node, e.g. /dev/video0")
-    parser.add_argument("--enroll", action="store_true", help="With --live: enroll the camera fingerprint instead")
     parser.add_argument("--attestation-mode", default="file_upload",
                         help="For --video: 'file_upload' (default), 'live', a preset name, or a JSON payload")
     parser.add_argument("--ref-fingerprint", help="Reference fingerprint (.npy) for --video")
@@ -467,9 +461,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", help="Write the JSON report here")
     args = parser.parse_args()
 
-    if args.live and args.enroll:
-        result = enroll_live_camera(args.live, n_frames=max(args.frames, 150), width=args.width, height=args.height)
-    elif args.live:
+    if args.live:
         result = run_live_session(args.live, n_frames=args.frames, width=args.width, height=args.height)
     else:
         result = run_detection_pipeline(args.video, attestation_mode=args.attestation_mode,

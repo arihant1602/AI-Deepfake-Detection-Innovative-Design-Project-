@@ -23,8 +23,8 @@ STATUS_STYLE = {
 GATE_NAMES = {
     "1a": "Real camera",
     "1b": "Live sensor",
-    "2": "Sensor fingerprint",
-    "3": "Motion consistency",
+    "2": "Sensor noise",
+    "3": "Face (deepfake model)",
 }
 
 
@@ -78,19 +78,25 @@ def stages_from_result(result: dict) -> list[dict]:
         ok = prnu.get("verdict") == "PRESENT"
         g2 = {"status": "PASS" if ok else "BLOCK", "label": "match" if ok else "no match",
               "value": f"PCE {prnu.get('pce_score'):,.0f}"}
+    elif prnu.get("verdict") == "PRESENT":
+        g2 = {"status": "PASS", "label": "live noise", "value": f"level {prnu.get('noise_sigma') or 0:.2f}"}
+    elif prnu.get("verdict") == "ABSENT":
+        g2 = {"status": "BLOCK" if prnu.get("enforced") else "ADVISORY",
+              "label": "no live noise" + ("" if prnu.get("enforced") else " (advisory)"),
+              "value": ", ".join(prnu.get("failed_checks") or [])}
     else:
-        g2 = {"status": "ADVISORY", "label": "not enrolled" if prnu.get("mode") == "blind" else "inconclusive"}
+        g2 = {"status": "ADVISORY", "label": "inconclusive"}
     g2.update(gate="Gate 2", name=GATE_NAMES["2"], ms=t.get("gate2_ms"))
 
     temporal = details.get("temporal") or (details if gate == 3 else None)
     if gate in (1, 2) or not temporal:
         g3 = {"status": "SKIPPED", "label": "not run"}
     elif gate == 3:
-        g3 = {"status": "BLOCK", "label": "anomaly", "value": f"score {temporal.get('score'):.2f}"}
+        g3 = {"status": "BLOCK", "label": "synthetic face", "value": f"P(fake) {temporal.get('score'):.2f}"}
     elif temporal.get("abstained"):
         g3 = {"status": "ABSTAINED", "label": "no face"}
     else:
-        g3 = {"status": "PASS", "label": "consistent", "value": f"score {temporal.get('score'):.2f}"}
+        g3 = {"status": "PASS", "label": "real face", "value": f"P(fake) {temporal.get('score'):.2f}"}
     g3.update(gate="Gate 3", name=GATE_NAMES["3"], ms=t.get("gate3_ms"))
     return [g1a, g1b, g2, g3]
 
@@ -145,10 +151,11 @@ def render_details(result: dict):
             st.caption(f"Mode: {prnu.get('mode')} · {'enforced' if prnu.get('enforced') else 'advisory'} · "
                        f"{prnu.get('frames_analyzed', '?')} frames · {prnu.get('latency_ms', 0):.0f} ms")
     if temporal:
-        with st.expander("Gate 3: motion consistency"):
+        with st.expander("Gate 3: face deepfake model"):
             st.write(temporal.get("explanation", ""))
-            st.caption(f"Score {temporal.get('score')} (flagged at 0.60) · face in {temporal.get('frames_with_face')} of "
-                       f"{temporal.get('frames_analyzed')} frames")
+            st.caption(f"{temporal.get('model', 'GenD')} · P(fake) {temporal.get('score')} (flagged at "
+                       f"{temporal.get('threshold', 0.5)}) · face in {temporal.get('frames_with_face')} of "
+                       f"{temporal.get('frames_analyzed')} sampled frames")
     frames = result.get("frames") or [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in result.get("frames_bgr", [])[:32]]
     if frames:
         with st.expander("Frames analysed"):

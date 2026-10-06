@@ -85,14 +85,14 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(res["verdict"], VERDICT_NO_ANOMALY)
         self.assertEqual(res["details"]["prnu"]["verdict"], "PRESENT")
         self.assertTrue(res["details"]["prnu"]["enforced"])
-        self.assertEqual(len(res["limitations"]), 1)
+        self.assertTrue(any(l.startswith("file input") for l in res["limitations"]))
         self.assertIn("frames", res)
 
 
 class TestFusion(unittest.TestCase):
     hw = {"verdict": "PASS"}
     ch = {"verdict": "PASS"}
-    prnu = {"mode": "reference", "verdict": "PRESENT"}
+    prnu = {"mode": "live_noise", "verdict": "PRESENT"}
     temporal = {"abstained": False, "frames_with_face": 60}
 
     def test_authentic_requires_every_live_check(self):
@@ -102,7 +102,7 @@ class TestFusion(unittest.TestCase):
         cases = [
             ({"verdict": "FLAG_FOR_REVIEW", "details": "x"}, self.ch, self.prnu, self.temporal),
             (self.hw, {"verdict": "UNSUPPORTED"}, self.prnu, self.temporal),
-            (self.hw, self.ch, {"mode": "blind", "verdict": "PRESENT"}, self.temporal),
+            (self.hw, self.ch, {"mode": "live_noise", "verdict": "INCONCLUSIVE"}, self.temporal),
             (self.hw, self.ch, self.prnu, {"abstained": True, "frames_with_face": 2}),
         ]
         for hw, ch, pr, te in cases:

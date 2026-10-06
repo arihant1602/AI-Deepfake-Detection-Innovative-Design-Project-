@@ -1,6 +1,5 @@
 """
-Unit tests for Layer 2: Camera Sensor Noise Profiling (PRNU Analysis)
-Synthetic scenes use a realistic 1% PRNU (multiplicative) plus shot noise.
+Unit tests for Layer 2: live sensor-noise test (default) and the optional reference-PRNU API.
 """
 
 import json
@@ -86,37 +85,68 @@ class TestPrimitives(unittest.TestCase):
         self.assertAlmostEqual(pce_with_shift_search(a, a)[0], compute_pce_and_ncc(a, a)[0], places=3)
 
 
-class TestBlindMode(unittest.TestCase):
+def noisy_stream(n=30, kind="camera", moving=False, seed=0):
+    """
+    Static textured scene plus per-frame noise of a given kind:
+      camera  spatially correlated (demosaic-like blur) and partially shared across channels
+      grey    white noise identical in all channels (digitally added grain)
+      colour  white noise independent per channel
+      codec   no fresh noise: static content repeats bit-for-bit (inter-frame codec)
+    """
+    rng = np.random.default_rng(seed)
+    base = cv2.GaussianBlur(rng.uniform(40, 210, (240, 320, 3)).astype(np.float32), (0, 0), 4)
+    frames = []
+    for t in range(n):
+        img = np.roll(base, 9 * t, axis=1) if moving else base.copy()
+        if kind == "camera":
+            common = rng.normal(0, 1.0, (240, 320, 1))
+            own = rng.normal(0, 0.8, (240, 320, 3))
+            img = img + cv2.GaussianBlur((common + own).astype(np.float32), (0, 0), 0.7) * 2.2
+        elif kind == "grey":
+            img = img + rng.normal(0, 2, (240, 320, 1))
+        elif kind == "colour":
+            img = img + rng.normal(0, 2, (240, 320, 3))
+        frames.append(np.clip(img, 0, 255).astype(np.uint8))
+    return frames
+
+
+class TestLiveNoiseMode(unittest.TestCase):
     def setUp(self):
         self.p = CameraSensorNoiseProfiler()
 
-    def test_camera_with_motion_is_present(self):
-        r = self.p.analyze_frames(make_scene(60, prnu=SENSOR_K))
-        self.assertEqual(r.verdict, "PRESENT")
+    def test_camera_like_noise_is_present(self):
+        r = self.p.analyze_frames(noisy_stream(kind="camera"))
+        self.assertEqual(r.verdict, "PRESENT", r.components)
         self.assertFalse(r.flagged)
-        self.assertGreater(r.components["z_score"], 10)
 
-    def test_rendered_frames_are_absent(self):
-        r = self.p.analyze_frames(make_scene(60, prnu=None))
+    def test_codec_stream_without_fresh_noise_is_absent(self):
+        r = self.p.analyze_frames(noisy_stream(kind="codec"))
         self.assertEqual(r.verdict, "ABSENT")
-        self.assertTrue(r.flagged)
+        self.assertIn("no codec copying", r.components["failed_checks"])
+        self.assertIn("noise present", r.components["failed_checks"])
 
-    def test_reanimated_photo_with_prnu_is_absent(self):
-        r = self.p.analyze_frames(make_scene(60, prnu=SENSOR_K, warp_photo=True))
+    def test_grey_grain_is_absent(self):
+        r = self.p.analyze_frames(noisy_stream(kind="grey"))
         self.assertEqual(r.verdict, "ABSENT")
+        self.assertTrue(set(r.components["failed_checks"]) & {"sensor-like colour", "sensor-like texture"})
 
-    def test_static_scene_is_inconclusive_not_flagged(self):
-        # The false-positive guard: with no content change, background texture is as
-        # pixel-locked as PRNU, so the layer must abstain rather than flag.
-        for k in (SENSOR_K, None):
-            r = self.p.analyze_frames(make_scene(60, moving=False, prnu=k))
-            self.assertEqual(r.verdict, "INCONCLUSIVE")
-            self.assertFalse(r.flagged)
+    def test_white_colour_grain_is_absent(self):
+        r = self.p.analyze_frames(noisy_stream(kind="colour"))
+        self.assertEqual(r.verdict, "ABSENT")
+        self.assertIn("sensor-like texture", r.components["failed_checks"])
+
+    def test_panning_textured_video_without_noise_is_not_present(self):
+        # A panning clip with no fresh noise (e.g. generated video): its shifting fine texture
+        # must not be mistaken for sensor noise.
+        rng = np.random.default_rng(3)
+        tex = cv2.GaussianBlur(rng.uniform(30, 220, (240, 400, 3)).astype(np.float32), (0, 0), 1.2)
+        frames = [np.clip(np.roll(tex, 3 * t, axis=1)[:, :320], 0, 255).astype(np.uint8) for t in range(30)]
+        r = self.p.analyze_frames(frames)
+        self.assertNotEqual(r.verdict, "PRESENT", r.components)
 
     def test_too_few_frames_abstains(self):
-        r = self.p.analyze_frames(make_scene(8, prnu=SENSOR_K))
+        r = self.p.analyze_frames(noisy_stream(n=8))
         self.assertEqual(r.verdict, "INCONCLUSIVE")
-        self.assertFalse(r.flagged)
 
     def test_missing_video_file(self):
         r = self.p.analyze("nonexistent_video_path.mp4")

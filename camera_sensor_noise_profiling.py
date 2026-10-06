@@ -1,6 +1,6 @@
 """
-Layer 2: Camera Sensor Noise Profiling (PRNU Analysis)
-======================================================
+Layer 2: Camera Sensor Noise
+============================
 
 Owner: Arihant
 Part of: Injection Attack & Deepfake Detection pipeline
@@ -9,43 +9,40 @@ Part of: Injection Attack & Deepfake Detection pipeline
 
 What this layer does
 --------------------
-Every CMOS sensor multiplies the incoming light by a fixed, pixel-specific gain
-pattern K (Photo-Response Non-Uniformity, PRNU). A frame therefore carries a
-noise component I * K that is *locked to the pixel grid*. Frames rendered by a
-generator, re-animated from a photo, or resampled/warped by a face-swap model do
-not carry a pixel-locked pattern that survives from one part of the clip to the
-next.
+Decides whether the frames carry *live sensor noise*: the fresh, physically produced
+noise of a camera sensor that is capturing right now. No enrollment is needed.
 
-Two modes are provided:
+Default mode - blind live-noise test
+  Computed on pixels that are static between consecutive frames, so scene motion does
+  not interfere. A stream has live sensor noise only if all four hold:
 
-  Mode B - blind, motion-gated PRNU persistence (default, no enrollment)
-    The clip is split into two temporally disjoint halves A and B and a
-    fingerprint K_A, K_B is estimated from each (MLE estimator, Lukas/Fridrich/
-    Goljan 2006; Chen et al. 2008). With a static camera, static background
-    *texture* is also pixel-locked and would masquerade as PRNU, so the two
-    fingerprints are compared **only over pixels whose scene content changed
-    between A and B** (the moving subject). Correlation that survives there can
-    only come from a pattern fixed to the sensor grid. Significance is measured
-    against a circular-shift null distribution, so spatially correlated residue
-    and codec block-grid artifacts do not inflate the result.
+    1. noise present    the frame-to-frame difference of the high-passed image has a
+                        robust std >= 0.6 grey levels. A camera re-samples its noise every
+                        frame; generators and video codecs largely do not.
+    2. no codec copying at most 0.1% of 8x8 blocks repeat bit-for-bit between frames.
+                        Inter-frame codecs (H.264/HEVC/VP9/AV1) copy unchanged macroblocks
+                        exactly; with live sensor noise all 64 pixels of a block never repeat.
+    3. textured noise   the lag-1 spatial autocorrelation of that noise is >= 0.15:
+                        demosaicing and JPEG make sensor noise spatially correlated,
+                        digitally added grain is white.
+    4. sensor colour    the blue/red noise correlation lies in [0.30, 0.98]: demosaicing
+                        partially correlates the colour channels; grey grain is identical
+                        in all channels (1.0), colour grain independent (0.0).
 
-    Outcomes:
-      PRESENT       pixel-locked sensor pattern found under content change
-      ABSENT        enough content change, but no pixel-locked pattern -> flag
-      INCONCLUSIVE  too little content change to decide -> never flagged
+  Measured (docs/ARCHITECTURE.md section 4.3): live webcam windows have exactly 0 repeated
+  8x8 blocks; codec-processed or generated clips (DF40, talking-head generators,
+  text-to-video, YouTube, x264 replays) mostly have 0.2-98%, and those with none have
+  noise <= 0.46; grey, colour and blurred synthetic grain each fail check 3 or 4.
 
-  Mode A - enrolled reference fingerprint (camera bound to Layer 1 identity)
-    The clip's residuals are correlated against a fingerprint previously
-    enrolled for the *attested* physical camera and scored with the standard
-    Peak-to-Correlation Energy (PCE; Goljan et al. 2009). A stream that did not
-    come from that sensor - including a replay of genuine footage recorded on a
-    different camera - fails the match.
+  Outcomes: PRESENT, ABSENT (fails a check), INCONCLUSIVE (too little static area).
 
-Every step is O(pixels x frames) with box filters and FFTs (no learned model).
+Optional mode - reference fingerprint (research API, not used by the app)
+  PCE (Goljan et al. 2009) of the clip's PRNU residual against a fingerprint estimated
+  earlier from the same camera.
 
 Usage
 -----
-    python camera_sensor_noise_profiling.py --video clip.mp4
+    python camera_sensor_noise_profiling.py --video clip.mp4                       # live-noise test
     python camera_sensor_noise_profiling.py --video calib.mp4 --enroll-ref fp.npy
     python camera_sensor_noise_profiling.py --video clip.mp4 --ref-fingerprint fp.npy
 """
@@ -76,25 +73,21 @@ CONFIG = {
     "saturation_low": 5,              # pixels at/below this carry no PRNU
     "saturation_high": 250,           # pixels at/above this carry no PRNU
     "dft_peak_factor": 3.0,           # spectral peaks above k x local median are clamped
-    # --- blind mode (motion gating) ---
-    "change_blur_sigma": 3.0,         # low-pass applied before measuring content change
-    "change_thresh": 10.0,            # grey-level change of the low-passed mean image
-    "change_erode": 5,                # erosion kernel applied to the change mask
-    "change_max_intensity": 230,      # highlights (ISP tone-curve shoulder) carry little usable PRNU
-    "min_changed_fraction": 0.04,     # need >=4% of the frame to have changed ...
-    "min_changed_pixels": 4000,       # ... and at least this many pixels
-    "null_shifts": 48,                # circular-shift null samples
-    "null_min_shift": 6,              # shifts closer than this to (0,0) are not used
-    "null_max_shift": 40,
-    "z_present": 5.0,                 # z-score at/above which PRNU is PRESENT ...
-    "rho_present": 0.05,              # ... provided the correlation is also at least this
-    "z_absent": 3.0,                  # z-score below which PRNU is ABSENT
-    "rho_absent": 0.04,               # correlation below which PRNU is ABSENT
+    # --- live-noise test ---
+    "noise_window": 45,               # frames analysed (consecutive pairs)
+    "noise_blur_sigma": 2.0,          # low-pass removed before measuring noise
+    "static_thresh": 1.5,             # max grey-level change (sigma=1 blur) of a static pixel ...
+    "static_grad_frac": 0.2,          # ... and max change relative to the local gradient (~0.2 px shift)
+    "min_static_pixels": 3000,        # per frame pair
+    "min_pairs": 8,                   # frame pairs with enough static pixels
+    "min_noise_sigma": 0.6,           # check 1
+    "max_block_repeat": 0.001,        # check 2: share of 8x8 blocks repeated bit-for-bit
+    "min_spatial_corr": 0.15,         # check 3
+    "colour_corr_range": (0.30, 0.97),  # check 4
     # --- reference mode ---
     "pce_peak_radius": 2,
     "pce_search_radius": 2,           # the peak may sit a few pixels off (0,0): sensor-mode scaler/crop phase
     "pce_match_thresh": 60.0,         # standard PCE decision threshold (Goljan 2009)
-    "random_seed": 1234,
 }
 
 VERDICT_PRESENT = "PRESENT"
@@ -288,6 +281,82 @@ def pce_with_shift_search(a: np.ndarray, b: np.ndarray, search_radius: int = CON
     return best
 
 
+def live_noise_features(frames: Sequence[np.ndarray], cfg: Optional[dict] = None) -> Optional[dict]:
+    """
+    Temporal-noise statistics over static pixels of consecutive frames (BGR or grey).
+    Returns None when fewer than `min_pairs` frame pairs have enough static pixels.
+    """
+    cfg = {**CONFIG, **(cfg or {})}
+    sig = cfg["noise_blur_sigma"]
+    colour = frames[0].ndim == 3
+    weights = np.array([0.114, 0.587, 0.299], np.float32)
+
+    def motion_view(y):
+        # Lightly blurred luma and its gradient magnitude. A shift of d pixels changes it by
+        # about d * gradient, so "static" must be judged relative to the local gradient, or
+        # moving fine texture would be mistaken for noise.
+        m = cv2.GaussianBlur(y, (0, 0), 1.0)
+        g = np.sqrt(cv2.Sobel(m, cv2.CV_32F, 1, 0, ksize=3) ** 2 + cv2.Sobel(m, cv2.CV_32F, 0, 1, ksize=3) ** 2) / 8.0
+        return m, g
+
+    d_y, d_b, d_r, n0, n1, repeats = [], [], [], [], [], []
+    prev = None
+    for fr in frames:
+        f = fr.astype(np.float32)
+        y = f @ weights if colour else f
+        lp = cv2.GaussianBlur(y, (0, 0), sig)
+        hp = f - (cv2.GaussianBlur(f, (0, 0), sig) if colour else lp)
+        m, grad = motion_view(y)
+        cur = (fr, m, hp)
+        if prev is not None:
+            pfr, pm, php = prev
+            change = np.abs(m - pm)
+            static = (change < cfg["static_thresh"]) & (change < cfg["static_grad_frac"] * grad + 0.6)
+            static &= (lp > 8) & (lp < 247)
+            static[:, -1] = False
+            if static.sum() >= cfg["min_static_pixels"]:
+                d = hp - php
+                dy = d @ weights if colour else d
+                d_y.append(dy[static])
+                pair = static & np.roll(static, -1, axis=1)
+                n0.append(dy[pair])
+                n1.append(np.roll(dy, -1, axis=1)[pair])
+                if colour:
+                    d_b.append(d[..., 0][static])
+                    d_r.append(d[..., 2][static])
+            raw = np.abs(fr.astype(np.int16) - pfr.astype(np.int16))
+            same = (raw.max(axis=2) if colour else raw) == 0
+            hh, ww = (same.shape[0] // 8) * 8, (same.shape[1] // 8) * 8
+            blocks = same[:hh, :ww].reshape(hh // 8, 8, ww // 8, 8).all(axis=(1, 3))
+            level = lp[:hh, :ww].reshape(hh // 8, 8, ww // 8, 8).mean(axis=(1, 3))
+            usable = (level > 12) & (level < 243)  # clipped black/white blocks repeat legitimately
+            if usable.sum() > 50:
+                repeats.append(float(blocks[usable].mean()))
+        prev = cur
+    if len(d_y) < cfg["min_pairs"]:
+        return None
+
+    def robust_std(v):
+        return float(1.4826 * np.median(np.abs(v)))
+
+    def corr(a, b):
+        ca, cb = 5 * robust_std(a) + 1e-6, 5 * robust_std(b) + 1e-6
+        a, b = np.clip(a, -ca, ca), np.clip(b, -cb, cb)
+        if a.std() < 1e-9 or b.std() < 1e-9:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
+
+    dy = np.concatenate(d_y)
+    out = {
+        "noise_sigma": float(robust_std(dy) / np.sqrt(2)),
+        "block_repeat": float(np.median(repeats)) if repeats else 0.0,
+        "spatial_corr": corr(np.concatenate(n0), np.concatenate(n1)),
+        "colour_corr": corr(np.concatenate(d_b), np.concatenate(d_r)) if colour else None,
+        "pairs": len(d_y),
+    }
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Frame I/O
 # --------------------------------------------------------------------------- #
@@ -312,7 +381,7 @@ def read_video_frames(video_path: str, max_frames: int) -> Tuple[List[np.ndarray
 # --------------------------------------------------------------------------- #
 
 class CameraSensorNoiseProfiler:
-    """Blind motion-gated PRNU persistence test, plus enrolled-reference PCE matching."""
+    """Blind live-sensor-noise test (default) plus optional reference-fingerprint PCE matching."""
 
     def __init__(self, config: Optional[dict] = None):
         self.cfg = {**CONFIG, **(config or {})}
@@ -334,7 +403,7 @@ class CameraSensorNoiseProfiler:
 
     def analyze_frames(self, frames: Sequence[np.ndarray], ref_fingerprint: Optional[np.ndarray] = None) -> LayerResult:
         frames = list(frames)[: self.cfg["max_frames"]]
-        result = LayerResult(mode="reference" if ref_fingerprint is not None else "blind")
+        result = LayerResult(mode="reference" if ref_fingerprint is not None else "live_noise")
         result.frames_analyzed = len(frames)
         if len(frames) == 0:
             result.explanation = "Input video contained 0 readable frames."
@@ -346,6 +415,9 @@ class CameraSensorNoiseProfiler:
             )
             return result
 
+        if ref_fingerprint is None:
+            return self._live_noise(result, frames[-self.cfg["noise_window"]:])
+
         grays = [to_gray_float(f) for f in frames]
         residuals = [
             extract_noise_residual(
@@ -354,10 +426,7 @@ class CameraSensorNoiseProfiler:
             )
             for g in grays
         ]
-
-        if ref_fingerprint is not None:
-            return self._reference_match(result, grays, residuals, ref_fingerprint)
-        return self._blind_gated(result, grays, residuals)
+        return self._reference_match(result, grays, residuals, ref_fingerprint)
 
     def estimate_fingerprint_from_frames(self, frames: Sequence[np.ndarray]) -> np.ndarray:
         grays = [to_gray_float(f) for f in frames]
@@ -379,138 +448,46 @@ class CameraSensorNoiseProfiler:
         print(f"Enrolled camera PRNU fingerprint {fp.shape} from {len(frames)} frames -> {output_npy_path}")
         return True
 
-    # ---------------------------- blind mode ---------------------------- #
+    # ------------------------- live-noise test ------------------------- #
 
-    def _change_mask(self, grays_a: Sequence[np.ndarray], grays_b: Sequence[np.ndarray]) -> np.ndarray:
-        """
-        Pixels whose low-passed scene content differs between the two halves. Only a
-        *between-half* difference guarantees that the scene texture leaking into K_A and
-        K_B is decorrelated: motion that merely oscillates (both halves revisit the same
-        content) leaks the same texture into both fingerprints and would mimic PRNU, so
-        such pixels are excluded. Each frame is gain-normalised first, so a global
-        exposure change of a static scene does not count as content change.
-        """
-        sigma = self.cfg["change_blur_sigma"]
-
-        def gain_normalised_mean(grays):
-            acc = None
-            ref = None
-            for g in grays:
-                lp = cv2.GaussianBlur(g, (0, 0), sigma)
-                m = float(lp.mean())
-                ref = m if ref is None else ref
-                lp *= ref / max(m, 1e-6)
-                acc = lp if acc is None else acc + lp
-            return acc / float(len(grays))
-
-        mean_a = gain_normalised_mean(grays_a)
-        mean_b = gain_normalised_mean(grays_b)
-        mean_b *= float(mean_a.mean()) / max(float(mean_b.mean()), 1e-6)
-        mask = np.abs(mean_a - mean_b) > self.cfg["change_thresh"]
-        k = self.cfg["change_erode"]
-        mask = cv2.erode(mask.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
-        lo, hi = self.cfg["saturation_low"], self.cfg["change_max_intensity"]
-        mask &= (mean_a > lo) & (mean_a < hi) & (mean_b > lo) & (mean_b < hi)
-        return mask
-
-    def _masked_shift_test(self, fp_a: np.ndarray, fp_b: np.ndarray, mask: np.ndarray) -> Tuple[float, float, float, float]:
-        a = fp_a[mask].astype(np.float64)
-        a -= a.mean()
-        a_norm = np.linalg.norm(a)
-
-        def ncc(b_full: np.ndarray) -> float:
-            b = b_full[mask].astype(np.float64)
-            b -= b.mean()
-            return float(np.dot(a, b) / (a_norm * np.linalg.norm(b) + 1e-12))
-
-        rho = ncc(fp_b)
-        rng = np.random.default_rng(self.cfg["random_seed"])
-        lo, hi = self.cfg["null_min_shift"], self.cfg["null_max_shift"]
-        nulls = []
-        while len(nulls) < self.cfg["null_shifts"]:
-            dy, dx = (int(v) for v in rng.integers(-hi, hi + 1, size=2))
-            if abs(dy) < lo and abs(dx) < lo:
-                continue
-            nulls.append(ncc(np.roll(fp_b, (dy, dx), axis=(0, 1))))
-        null_mean, null_std = float(np.mean(nulls)), float(np.std(nulls))
-        z = (rho - null_mean) / (null_std + 1e-12)
-        return rho, z, null_mean, null_std
-
-    def _blind_gated(self, result: LayerResult, grays, residuals) -> LayerResult:
+    def _live_noise(self, result: LayerResult, frames) -> LayerResult:
         cfg = self.cfg
-        half = len(grays) // 2
-        fp_a = estimate_fingerprint(grays[:half], residuals[:half])
-        fp_b = estimate_fingerprint(grays[half:], residuals[half:])
-        mask = self._change_mask(grays[:half], grays[half:])
-
-        n_changed = int(mask.sum())
-        frac_changed = n_changed / mask.size
-        components = {
-            "changed_fraction": round(frac_changed, 4),
-            "changed_pixels": n_changed,
-            "frames_per_half": half,
-        }
-
-        enough_change = frac_changed >= cfg["min_changed_fraction"] and n_changed >= cfg["min_changed_pixels"]
-        if not enough_change:
+        f = live_noise_features(frames, cfg)
+        if f is None:
             result.verdict = VERDICT_INCONCLUSIVE
-            result.score = 0.5
-            result.flagged = False
-            result.confidence = round(min(1.0, frac_changed / cfg["min_changed_fraction"]) * 0.3, 2)
-            result.components = {**components, "rho": None, "z_score": None, "static_noise_detected": None}
-            result.explanation = (
-                f"Inconclusive: only {frac_changed:.1%} of the frame changed content during the clip. "
-                "With a static scene, background texture is as pixel-locked as sensor noise, so sensor "
-                "PRNU cannot be isolated. Ask the subject to move (e.g. turn head) and re-capture."
-            )
+            result.explanation = ("Too little of the scene is still between frames to measure sensor noise "
+                                  "(subject moving across the whole frame, or a very dark/bright scene).")
+            result.components = {"static_noise_detected": None}
             return result
-
-        rho, z, null_mean, null_std = self._masked_shift_test(fp_a, fp_b, mask)
-        components.update({
-            "rho": round(rho, 4),
-            "z_score": round(z, 2),
-            "null_mean": round(null_mean, 5),
-            "null_std": round(null_std, 5),
-        })
-
-        if z >= cfg["z_present"] and rho >= cfg["rho_present"]:
-            verdict = VERDICT_PRESENT
-        elif z < cfg["z_absent"] or rho < cfg["rho_absent"]:
-            verdict = VERDICT_ABSENT
+        lo, hi = cfg["colour_corr_range"]
+        checks = {
+            "noise present": bool(f["noise_sigma"] >= cfg["min_noise_sigma"]),
+            "no codec copying": bool(f["block_repeat"] <= cfg["max_block_repeat"]),
+            "sensor-like texture": bool(f["spatial_corr"] >= cfg["min_spatial_corr"]),
+        }
+        if f["colour_corr"] is not None:
+            checks["sensor-like colour"] = bool(lo <= f["colour_corr"] <= hi)
+        failed = [k for k, ok in checks.items() if not ok]
+        present = not failed
+        result.verdict = VERDICT_PRESENT if present else VERDICT_ABSENT
+        result.flagged = not present
+        result.score = round(len(failed) / len(checks), 3)
+        result.confidence = round(min(1.0, f["pairs"] / 20), 2)
+        result.components = {**{k: (round(v, 4) if isinstance(v, float) else v) for k, v in f.items()},
+                             "checks": checks, "failed_checks": failed, "static_noise_detected": present}
+        why = {
+            "noise present": f"almost no frame-to-frame noise ({f['noise_sigma']:.2f} < {cfg['min_noise_sigma']})",
+            "no codec copying": f"{f['block_repeat']:.1%} of image blocks repeat exactly, a video-codec fingerprint",
+            "sensor-like texture": f"noise is white like added grain (spatial corr {f['spatial_corr']:.2f})",
+            "sensor-like colour": f"colour channels do not behave like a sensor (corr {f['colour_corr'] or 0:.2f})",
+        }
+        if present:
+            result.explanation = (f"Live sensor noise present: noise {f['noise_sigma']:.2f}, "
+                                  f"{f['block_repeat']:.1%} repeated blocks, texture {f['spatial_corr']:.2f}"
+                                  + (f", colour {f['colour_corr']:.2f}." if f["colour_corr"] is not None else "."))
         else:
-            verdict = VERDICT_INCONCLUSIVE
-
-        # Anomaly score: logistic in z centred between the ABSENT and PRESENT thresholds.
-        z_mid = 0.5 * (cfg["z_absent"] + cfg["z_present"])
-        score = float(1.0 / (1.0 + np.exp(np.clip(z - z_mid, -50, 50))))
-        if verdict == VERDICT_ABSENT and rho < cfg["rho_absent"]:
-            score = max(score, 0.75)
-
-        result.verdict = verdict
-        result.flagged = verdict == VERDICT_ABSENT
-        result.score = round(score, 4)
-        coverage = min(1.0, n_changed / (10 * cfg["min_changed_pixels"]))
-        result.confidence = round(float(np.clip(0.4 + 0.6 * coverage, 0.0, 1.0)) if verdict != VERDICT_INCONCLUSIVE else 0.3, 2)
-        components["static_noise_detected"] = verdict == VERDICT_PRESENT
-        result.components = components
-        result.explanation = self._explain_blind(verdict, components)
+            result.explanation = "No live sensor noise: " + "; ".join(why[k] for k in failed) + "."
         return result
-
-    @staticmethod
-    def _explain_blind(verdict: str, c: dict) -> str:
-        stats = f"rho={c['rho']:.3f}, z={c['z_score']:.1f} over {c['changed_fraction']:.1%} of the frame"
-        if verdict == VERDICT_PRESENT:
-            return (
-                "Pixel-locked sensor noise (PRNU) persists across disjoint halves of the clip in regions "
-                f"whose content changed ({stats}): consistent with a physical CMOS sensor."
-            )
-        if verdict == VERDICT_ABSENT:
-            return (
-                "No pixel-locked sensor pattern survives in the moving regions of the clip "
-                f"({stats}). Frames were rendered, re-animated, warped or resampled rather than "
-                "captured natively by a camera sensor."
-            )
-        return f"Weak sensor-pattern evidence ({stats}); neither PRESENT nor ABSENT thresholds reached."
 
     # -------------------------- reference mode -------------------------- #
 

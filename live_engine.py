@@ -2,10 +2,10 @@
 Real-time detection engine behind the live page.
 
 A capture thread owns the camera: it streams frames into a ring buffer and runs the
-Gate 1b sensor challenge every CHALLENGE_INTERVAL seconds (and immediately when the
-fingerprint score drops). An analysis thread re-runs Gate 2 (reference PRNU) and Gate 3
-(temporal) once per second on a rolling window and records every threshold crossing as
-an event.
+Gate 1b sensor challenge every CHALLENGE_INTERVAL seconds (and immediately when live sensor
+noise disappears). An analysis thread re-runs Gate 2 (live sensor noise) and Gate 3
+(GenD face-deepfake probability) once per second on a rolling window and records every
+threshold crossing as an event.
 
 The camera is released when stop() is called, when the UI stops sending heartbeats for
 HEARTBEAT_TIMEOUT seconds (tab closed, page left), when another engine takes over the
@@ -30,17 +30,15 @@ import cv2
 import numpy as np
 
 import host_integrity as h
-from camera_sensor_noise_profiling import CameraSensorNoiseProfiler, FingerprintStore
-from pipeline import DEFAULT_FINGERPRINT_DIR, MIN_TEMPORAL_FACE_FRAMES
-from temporal_consistency_analysis import FaceLocator, TemporalConsistencyAnalyzer
+from camera_sensor_noise_profiling import CameraSensorNoiseProfiler
+from pipeline import get_deepfake_detector
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CHALLENGE_INTERVAL = 10.0     # seconds between liveness challenges
 HEARTBEAT_TIMEOUT = 8.0       # release the camera if the UI stops polling for this long
-WINDOW = 45                   # frames per rolling analysis window (1.5 s at 30 fps)
-ENROLL_FRAMES = 150
-PCE_T = 60.0
-TEMPORAL_T = 0.60
+WINDOW = 20                   # frames for the sensor-noise test (19 consecutive pairs; 8 needed)
+NOISE_T = 0.6                 # live-noise level threshold (check 1 of Gate 2), for the graph
+DEEPFAKE_FRAMES = 4           # face crops scored by GenD per tick (judged on a 3-tick median)
 INJECTIONS = {
     "none": "Off",
     "replay": "Replay of this camera's last 3 s",
@@ -71,7 +69,7 @@ class LiveEngine:
         # Held by the analysis thread while it computes and by the challenge while it runs, so the
         # capture thread is never starved of CPU during the timing-sensitive liveness check.
         self.compute_lock = threading.Lock()
-        self.buffer: deque = deque(maxlen=ENROLL_FRAMES + 60)   # (t, frame, during_challenge, injected)
+        self.buffer: deque = deque(maxlen=150)   # (t, frame, during_challenge, injected)
         self.latest: Optional[np.ndarray] = None
         self.latest_t = 0.0
         self.face_box = None
@@ -85,21 +83,17 @@ class LiveEngine:
 
         self.hw: Optional[dict] = None
         self.camera_id: Optional[str] = None
-        self.store = FingerprintStore(DEFAULT_FINGERPRINT_DIR)
-        self.fingerprint: Optional[np.ndarray] = None
-
-        self.pce_hist: deque = deque(maxlen=120)       # (t, pce)
-        self.temporal_hist: deque = deque(maxlen=120)  # (t, score, abstained)
+        self.noise_hist: deque = deque(maxlen=120)     # (t, noise_sigma, verdict, failed_checks)
+        self.deepfake_hist: deque = deque(maxlen=120)  # (t, P(fake) or None, abstained)
+        self.deepfake_threshold: Optional[float] = None
         self.challenges: deque = deque(maxlen=20)      # (t, result)
         self.events: deque = deque(maxlen=40)          # (t, level, text)
 
         self.injection = "none"
         self._inject_frames: list = []
         self._inject_i = 0
-        self.enroll_state: Optional[dict] = None
 
         self._prnu = CameraSensorNoiseProfiler()
-        self._temporal = TemporalConsistencyAnalyzer()
         self._threads: list = []
 
     # ------------------------------------------------------------------ control
@@ -119,9 +113,6 @@ class LiveEngine:
             self.log("block", self.hw["details"])
             self.stop_reason = "blocked by the device check; camera never opened"
             return False
-        self.fingerprint = self.store.load(self.camera_id, self.width, self.height) if self.camera_id else None
-        if self.fingerprint is None:
-            self.log("warn", "No enrolled fingerprint for this camera yet: press Enroll")
         self.running = True
         self._threads = [threading.Thread(target=self._capture_loop, daemon=True, name="capture"),
                          threading.Thread(target=self._analysis_loop, daemon=True, name="analysis")]
@@ -139,14 +130,6 @@ class LiveEngine:
 
     def request_challenge(self):
         self.challenge_now.set()
-
-    def request_enroll(self):
-        if self.injection != "none":
-            self.log("warn", "Turn the simulated attack off before enrolling")
-            return
-        with self.lock:
-            self.enroll_state = {"since": time.time(), "frames": []}
-        self.log("info", "Enrolling: keep moving the camera slowly for 5 s")
 
     def set_injection(self, mode: str):
         if mode == self.injection:
@@ -263,65 +246,70 @@ class LiveEngine:
     # ------------------------------------------------------------------ analysis
 
     def _window(self, n: int, allow_injected: bool = True) -> list:
+        # Consecutive non-challenge frames only: the live-noise test compares neighbours.
         with self.lock:
             items = [x for x in self.buffer if not x[2] and (allow_injected or not x[3])]
         return [f for (_, f, _, _) in items[-n:]]
 
     def _analysis_loop(self):
-        locator = FaceLocator(max_missed_frames=0)
-        while not self.stop_evt.wait(1.0):
+        self.log("info", "Loading the deepfake model…")
+        det = get_deepfake_detector()
+        if isinstance(det, Exception):
+            self.log("warn", f"Deepfake model unavailable, Gate 3 off: {det}")
+            det = None
+        else:
+            self.deepfake_threshold = det.cfg["fake_threshold"]
+            self.log("info", f"Deepfake model ready (GenD {det.cfg['backbone'].upper()} on {det.device})")
+        # Two staggered half-second steps, each holding the compute lock only for its own work,
+        # so the capture thread and the liveness check are never starved.
+        while not self.stop_evt.wait(0.5):
             with self.compute_lock:
-                self._analyse_once(locator)
+                self._noise_step(det)
+            if self.stop_evt.wait(0.5):
+                break
+            if det is not None:
+                with self.compute_lock:
+                    self._deepfake_step(det)
 
-    def _analyse_once(self, locator):
-        if self.enroll_state is not None:
-            self._step_enrollment()
-            return
+    def _noise_step(self, det):
         frames = self._window(WINDOW)
-        if len(frames) < 30:
+        if len(frames) < WINDOW:
             return
         now = time.time()
-        g = cv2.cvtColor(frames[-1], cv2.COLOR_BGR2GRAY)
-        self.face_box = locator.locate(g)
-
-        if self.fingerprint is not None:
-            r = self._prnu.analyze_frames(frames, ref_fingerprint=self.fingerprint)
-            pce = r.components.get("pce_score")
-            if pce is not None:
-                prev = self.pce_hist[-1][1] if self.pce_hist else None
-                with self.lock:
-                    self.pce_hist.append((now, pce))
-                if pce < PCE_T and (prev is None or prev >= PCE_T):
-                    self.log("block", f"Sensor fingerprint lost: score {pce:,.1f} (needs {PCE_T:.0f})")
-                    self.request_challenge()
-                elif pce >= PCE_T and prev is not None and prev < PCE_T:
-                    self.log("ok", f"Sensor fingerprint back: score {pce:,.0f}")
-
-        t = self._temporal.analyze_frames(frames)
-        abstained = t.frames_with_face < MIN_TEMPORAL_FACE_FRAMES
-        prev_t = self.temporal_hist[-1] if self.temporal_hist else None
+        if det is not None:
+            found = det.faces.detect(frames[-1])
+            self.face_box = tuple(found[0]) if found is not None else None
+        r = self._prnu.analyze_frames(frames)
+        c = r.components
+        prev = self.noise_hist[-1][2] if self.noise_hist else None
         with self.lock:
-            self.temporal_hist.append((now, float(t.score), abstained))
-        if not abstained and t.flagged and (prev_t is None or prev_t[2] or prev_t[1] < TEMPORAL_T):
-            self.log("block", f"Motion anomaly: score {t.score:.2f} (flagged at {TEMPORAL_T:.2f})")
+            self.noise_hist.append((now, c.get("noise_sigma"), r.verdict, c.get("failed_checks") or []))
+        if r.verdict == "ABSENT" and prev != "ABSENT":
+            self.log("block", r.explanation)
+            self.request_challenge()
+        elif r.verdict == "PRESENT" and prev == "ABSENT":
+            self.log("ok", "Live sensor noise back")
 
-    def _step_enrollment(self):
-        st_ = self.enroll_state
-        with self.lock:
-            new = [f for (t, f, ch, inj) in self.buffer if t > st_["since"] and not ch and not inj]
-        if len(new) < ENROLL_FRAMES:
+    def _deepfake_step(self, det):
+        frames = self._window(WINDOW)
+        if len(frames) < WINDOW:
             return
-        fp = self._prnu.estimate_fingerprint_from_frames(new[:ENROLL_FRAMES])
-        last = self.challenges[0][1]["verdict"] if self.challenges else None
-        if last != "PASS":
-            self.log("block", "Enrollment refused: the last liveness check did not pass")
-        else:
-            self.store.save(self.camera_id, fp, {"frames": ENROLL_FRAMES, "node": self.node, "source": "live engine"})
-            self.fingerprint = fp
-            with self.lock:
-                self.pce_hist.clear()
-            self.log("ok", f"Enrolled fingerprint for {self.camera_id} at {self.width}x{self.height}")
-        self.enroll_state = None
+        step = max(1, len(frames) // DEEPFAKE_FRAMES)
+        r = det.analyze_frames(frames[::step][:DEEPFAKE_FRAMES], min_faces=2)
+        was = self.deepfake_smoothed()
+        with self.lock:
+            self.deepfake_hist.append((time.time(), r.fake_probability, r.abstained))
+        cur = self.deepfake_smoothed()
+        thr = self.deepfake_threshold
+        if cur is not None and cur >= thr and (was is None or was < thr):
+            self.log("block", f"Face looks synthetic: P(fake) {cur:.2f} over the last 3 s (flagged at {thr:.2f})")
+        elif cur is not None and cur < thr and was is not None and was >= thr:
+            self.log("ok", f"Face looks real again: P(fake) {cur:.2f}")
+
+    def deepfake_smoothed(self) -> Optional[float]:
+        """Median P(fake) of the last 3 scored seconds: one noisy window cannot flag a real user."""
+        vals = [p for (_, p, abst) in list(self.deepfake_hist)[-3:] if not abst and p is not None]
+        return float(np.median(vals)) if len(vals) >= 2 else None
 
     # ------------------------------------------------------------------ snapshot for the UI
 
@@ -330,13 +318,12 @@ class LiveEngine:
             return {
                 "running": self.running, "stop_reason": self.stop_reason, "fps": self.fps,
                 "in_challenge": self.in_challenge, "next_challenge_in": max(0.0, self.next_challenge - time.time()),
-                "hw": self.hw, "camera_id": self.camera_id, "enrolled": self.fingerprint is not None,
-                "pce": list(self.pce_hist), "temporal": list(self.temporal_hist),
+                "hw": self.hw, "camera_id": self.camera_id,
+                "noise": list(self.noise_hist), "deepfake": list(self.deepfake_hist),
+                "deepfake_threshold": self.deepfake_threshold,
+                "deepfake_smoothed": self.deepfake_smoothed(),
                 "challenges": list(self.challenges), "events": list(self.events),
                 "injection": self.injection, "face_box": self.face_box,
-                "enrolling": self.enroll_state is not None,
-                "enroll_progress": (sum(1 for (t, _, ch, inj) in self.buffer if self.enroll_state and t > self.enroll_state["since"]
-                                        and not ch and not inj) / ENROLL_FRAMES) if self.enroll_state else 0.0,
                 "started": self.started,
             }
 
