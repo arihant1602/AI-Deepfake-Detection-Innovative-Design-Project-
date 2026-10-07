@@ -21,6 +21,7 @@ resize/normalisation to 224x224. Detection uses OpenCV's YuNet (MIT, ships with 
 instead of InsightFace RetinaFace, whose weights are non-commercial.
 
     python deepfake_detector.py --video clip.mp4 [--backbone clip|pe]
+    python deepfake_detector.py --fetch      # download all weights once; later loads are offline
 """
 
 from __future__ import annotations
@@ -56,6 +57,28 @@ CONFIG = {
 # GenD model (vendored from github.com/yermandy/GenD, src/hf/modeling_gend.py, MIT)
 # --------------------------------------------------------------------------- #
 
+def _from_hub(fn, *args, **kwargs):
+    """
+    Calls a Hugging Face loader from the local cache only, so a cached model never touches the
+    network (no update check, no failure on flaky Wi-Fi); downloads only if it is not cached yet.
+    """
+    try:
+        return fn(*args, local_files_only=True, **kwargs)
+    except Exception:
+        return fn(*args, **kwargs)
+
+
+def fetch_weights(backbones: Sequence[str] = tuple(BACKBONES)) -> None:
+    """Downloads every model file the detector needs into the local caches (run once, online)."""
+    from huggingface_hub import snapshot_download
+    for b in backbones:
+        print(f"GenD {b}: {snapshot_download(BACKBONES[b])}")
+        if b == "clip":  # the CLIP backbone also reads its config/preprocessor from the base repo
+            snapshot_download("openai/clip-vit-large-patch14", allow_patterns=["*.json", "*.txt"])
+    FaceDetector()  # fetches YuNet into models/ if missing
+    print(f"YuNet: {YUNET_PATH}")
+
+
 def _build_gend_classes():
     import torch.nn as nn
     import torch.nn.functional as F
@@ -77,10 +100,10 @@ def _build_gend_classes():
             super().__init__()
             # Built from the config only: the GenD checkpoint carries all vision-tower weights.
             from transformers import CLIPConfig, CLIPImageProcessor, CLIPVisionModel
-            self._preprocess = CLIPImageProcessor.from_pretrained(model_name)
+            self._preprocess = _from_hub(CLIPImageProcessor.from_pretrained, model_name)
             # transformers 5: CLIPVisionModel has the vision transformer's submodules at top level,
             # so parameter names match the checkpoint (feature_extractor.vision_model.embeddings...).
-            self.vision_model = CLIPVisionModel(CLIPConfig.from_pretrained(model_name).vision_config)
+            self.vision_model = CLIPVisionModel(_from_hub(CLIPConfig.from_pretrained, model_name).vision_config)
             self.features_dim = self.vision_model.config.hidden_size
 
         def preprocess(self, image):
@@ -151,8 +174,8 @@ def load_gend(repo: str):
     from huggingface_hub import hf_hub_download
     from safetensors.torch import load_file
     GenD, GenDConfig = _build_gend_classes()
-    model = GenD(GenDConfig.from_pretrained(repo))
-    state = load_file(hf_hub_download(repo, "model.safetensors"))
+    model = GenD(_from_hub(GenDConfig.from_pretrained, repo))
+    state = load_file(_from_hub(hf_hub_download, repo, "model.safetensors"))
     missing, unexpected = model.load_state_dict(state, strict=False)
     missing = [k for k in missing if not k.endswith("position_ids")]
     # CLIP's text-alignment projection is stored but unused: GenD classifies pooled vision features.
@@ -305,9 +328,14 @@ class DeepfakeDetector:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--video", required=True)
+    ap.add_argument("--video")
     ap.add_argument("--backbone", choices=list(BACKBONES), default=CONFIG["backbone"])
+    ap.add_argument("--fetch", action="store_true", help="download all model weights once, then exit")
     args = ap.parse_args()
+    if args.fetch:
+        return fetch_weights()
+    if not args.video:
+        ap.error("--video is required (or pass --fetch)")
     print(DeepfakeDetector(args.backbone).analyze(args.video).to_json())
 
 
