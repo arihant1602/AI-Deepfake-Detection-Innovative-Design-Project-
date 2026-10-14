@@ -21,6 +21,7 @@ from __future__ import annotations
 import atexit
 import glob
 import os
+import secrets
 import threading
 import time
 from collections import deque
@@ -69,6 +70,8 @@ atexit.register(_shutdown_all)
 class LiveEngine:
     def __init__(self, node: str, width: int = 640, height: int = 480):
         self.node, self.width, self.height = node, width, height
+        # Capability for the MJPEG route: only the Streamlit session that started the engine knows it.
+        self.stream_token = secrets.token_urlsafe(24)
         self.lock = threading.Lock()
         self.stop_evt = threading.Event()
         self.challenge_now = threading.Event()

@@ -4,10 +4,11 @@ Server entry point for the Streamlit app (the UI itself is streamlit_app.py).
     streamlit run app.py
 
 Adds two things a plain Streamlit script cannot do:
-  * /api/live.mjpg?node=/dev/videoN  streams the live camera as MJPEG straight from the
+  * /api/live.mjpg?node=/dev/videoN&token=...  streams the live camera as MJPEG straight from the
     engine's frame buffer, at the camera's frame rate. Pushing frames through Streamlit
     reruns (st.image in a fragment) capped the video at a few fps and stalled whenever a
-    chart fragment was rendering.
+    chart fragment was rendering. The token is a per-session secret, so only the browser
+    session that started the camera can view it.
   * the deepfake model starts loading in the background as soon as the server starts, so
     the first live session does not wait for it.
 """
@@ -15,6 +16,7 @@ Adds two things a plain Streamlit script cannot do:
 import asyncio
 import gc
 import os
+import secrets
 import threading
 from contextlib import asynccontextmanager
 
@@ -32,14 +34,15 @@ JPEG_QUALITY = 80
 
 async def live_mjpeg(request):
     node = request.query_params.get("node", "")
-    if live_engine.get_engine(node) is None:
+    token = request.query_params.get("token", "")
+    eng = live_engine.get_engine(node)
+    if eng is None or not secrets.compare_digest(token, eng.stream_token):
         return Response("No live session on this camera.", status_code=404)
 
     async def frames():
         last_t = 0.0
         while True:
-            eng = live_engine.get_engine(node)
-            if eng is None or not eng.running:
+            if live_engine.get_engine(node) is not eng or not eng.running:
                 return
             frame, t = eng.frame()
             if frame is None or t == last_t:

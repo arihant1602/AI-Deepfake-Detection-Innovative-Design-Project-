@@ -156,7 +156,7 @@ def video():
         cv2.putText(blank, msg, (24, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (170, 170, 170), 2, cv2.LINE_AA)
         st.image(blank, channels="BGR", output_format="JPEG", width="stretch", alt="Camera off")
         return
-    src = f"/api/live.mjpg?node={quote(e.node)}&session={e.started:.0f}"
+    src = f"/api/live.mjpg?node={quote(e.node)}&token={e.stream_token}"
     st.html(f'<img src="{src}" alt="Live camera" width="{e.width}" height="{e.height}" '
             f'style="display:block;width:100%;height:auto;aspect-ratio:{e.width}/{e.height};background:#181818;border-radius:4px">')
 
