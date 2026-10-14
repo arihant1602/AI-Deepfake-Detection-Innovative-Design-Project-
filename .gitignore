@@ -33,3 +33,6 @@ fingerprints/
 
 # Benchmark data (personal webcam captures, third-party datasets) and results scratch
 benchmarks/data/
+
+# Model weights placed by `python deepfake_detector.py --fetch` (GenD, ~2.4 GB)
+models/hf/

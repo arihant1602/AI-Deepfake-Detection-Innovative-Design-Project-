@@ -21,7 +21,7 @@ resize/normalisation to 224x224. Detection uses OpenCV's YuNet (MIT, ships with 
 instead of InsightFace RetinaFace, whose weights are non-commercial.
 
     python deepfake_detector.py --video clip.mp4 [--backbone clip|pe]
-    python deepfake_detector.py --fetch      # download all weights once; later loads are offline
+    python deepfake_detector.py --fetch      # download all weights once into models/hf/; later loads are offline
 """
 
 from __future__ import annotations
@@ -41,6 +41,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 YUNET_PATH = os.path.join(ROOT, "models", "face_detection_yunet_2023mar.onnx")
 YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 BACKBONES = {"clip": "yermandy/GenD_CLIP_L_14", "pe": "yermandy/GenD_PE_L"}
+CLIP_BASE = "openai/clip-vit-large-patch14"
+LOCAL_HF = os.path.join(ROOT, "models", "hf")  # project-local copies written by --fetch (git-ignored)
 
 CONFIG = {
     "backbone": "pe",
@@ -57,24 +59,60 @@ CONFIG = {
 # GenD model (vendored from github.com/yermandy/GenD, src/hf/modeling_gend.py, MIT)
 # --------------------------------------------------------------------------- #
 
-def _from_hub(fn, *args, **kwargs):
+def _local(repo: str) -> str:
+    """Project-local copy of a Hugging Face repo (models/hf/<org>__<name>) if --fetch made one, else the repo id."""
+    path = os.path.join(LOCAL_HF, repo.replace("/", "__"))
+    return path if os.path.isfile(os.path.join(path, "config.json")) else repo
+
+
+def _from_hub(fn, repo, *args, **kwargs):
     """
-    Calls a Hugging Face loader from the local cache only, so a cached model never touches the
-    network (no update check, no failure on flaky Wi-Fi); downloads only if it is not cached yet.
+    Calls a Hugging Face loader on the project-local copy if there is one (no network, no cache
+    lookup), else on the local HF cache only, so a cached model never touches the network either;
+    downloads only if it is not cached yet.
     """
+    repo = _local(repo)
+    if os.path.isdir(repo):
+        return fn(repo, *args, **kwargs)
     try:
-        return fn(*args, local_files_only=True, **kwargs)
+        return fn(repo, *args, local_files_only=True, **kwargs)
     except Exception:
-        return fn(*args, **kwargs)
+        return fn(repo, *args, **kwargs)
+
+
+def _weights_path(repo: str) -> str:
+    local = _local(repo)
+    if os.path.isdir(local):
+        return os.path.join(local, "model.safetensors")
+    from huggingface_hub import hf_hub_download
+    return _from_hub(hf_hub_download, repo, "model.safetensors")
 
 
 def fetch_weights(backbones: Sequence[str] = tuple(BACKBONES)) -> None:
-    """Downloads every model file the detector needs into the local caches (run once, online)."""
+    """
+    Downloads every model file the detector needs (run once, online) and places a copy under
+    models/hf/, which is what every later load reads. Files are hard-linked from the HF cache when
+    both are on one filesystem, so the copy costs no extra disk space.
+    """
+    import shutil
     from huggingface_hub import snapshot_download
-    for b in backbones:
-        print(f"GenD {b}: {snapshot_download(BACKBONES[b])}")
-        if b == "clip":  # the CLIP backbone also reads its config/preprocessor from the base repo
-            snapshot_download("openai/clip-vit-large-patch14", allow_patterns=["*.json", "*.txt"])
+    repos = [BACKBONES[b] for b in backbones] + ([CLIP_BASE] if "clip" in backbones else [])
+    for repo in repos:
+        # The CLIP backbone reads only its config/preprocessor from the base repo (GenD carries the weights).
+        src = snapshot_download(repo, allow_patterns=["*.json", "*.txt"] if repo == CLIP_BASE else None)
+        dst = os.path.join(LOCAL_HF, repo.replace("/", "__"))
+        os.makedirs(dst, exist_ok=True)
+        for name in os.listdir(src):
+            s, d = os.path.realpath(os.path.join(src, name)), os.path.join(dst, name)
+            if not os.path.isfile(s) or (os.path.exists(d) and os.path.getsize(d) == os.path.getsize(s)):
+                continue
+            if os.path.exists(d):
+                os.remove(d)
+            try:
+                os.link(s, d)
+            except OSError:
+                shutil.copy2(s, d)
+        print(f"{repo}: {dst}")
     FaceDetector()  # fetches YuNet into models/ if missing
     print(f"YuNet: {YUNET_PATH}")
 
@@ -96,7 +134,7 @@ def _build_gend_classes():
             return self.linear(x)
 
     class CLIPEncoder(nn.Module):
-        def __init__(self, model_name="openai/clip-vit-large-patch14"):
+        def __init__(self, model_name=CLIP_BASE):
             super().__init__()
             # Built from the config only: the GenD checkpoint carries all vision-tower weights.
             from transformers import CLIPConfig, CLIPImageProcessor, CLIPVisionModel
@@ -166,16 +204,20 @@ def _build_gend_classes():
     return GenD, GenDConfig
 
 
-def load_gend(repo: str):
+def load_gend(repo: str, device: str = "cpu"):
     """
     Builds GenD from its config and loads the released checkpoint explicitly, failing loudly
     if any parameter is missing or unexpected (a silent partial load would be meaningless).
+    The model is constructed directly on `device`: its random initialisation is overwritten by
+    the checkpoint anyway, and on a GPU it takes milliseconds instead of ~2 s on the CPU.
     """
-    from huggingface_hub import hf_hub_download
+    import torch
     from safetensors.torch import load_file
     GenD, GenDConfig = _build_gend_classes()
-    model = GenD(_from_hub(GenDConfig.from_pretrained, repo))
-    state = load_file(_from_hub(hf_hub_download, repo, "model.safetensors"))
+    config = _from_hub(GenDConfig.from_pretrained, repo)
+    with torch.device(device):
+        model = GenD(config)
+    state = load_file(_weights_path(repo), device=device)
     missing, unexpected = model.load_state_dict(state, strict=False)
     missing = [k for k in missing if not k.endswith("position_ids")]
     # CLIP's text-alignment projection is stored but unused: GenD classifies pooled vision features.
@@ -257,9 +299,10 @@ class DeepfakeDetector:
         import torch
         self.cfg = {**CONFIG, **(config or {}), "backbone": backbone}
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = load_gend(BACKBONES[backbone]).eval().to(self.device)
+        self.model = load_gend(BACKBONES[backbone], self.device).eval()
         if self.device == "cuda":
             self.model = self.model.half()
+            self.score_crops([np.zeros((256, 256, 3), np.uint8)])  # warm-up: CUDA kernels load on the first call
         self.faces = FaceDetector()
 
     def crops(self, frames: Sequence[np.ndarray]) -> tuple:

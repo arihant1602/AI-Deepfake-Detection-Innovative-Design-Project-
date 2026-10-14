@@ -44,3 +44,9 @@ toolbarMode = "viewer"
 
 [server]
 address = "localhost"
+
+[runner]
+# Streamlit runs a full gc.collect() after every script and fragment run. With PyTorch loaded
+# each one holds the GIL for ~300 ms, which froze the camera capture thread (the live video
+# dropped to a few fps). Python's automatic, incremental collection still runs.
+postScriptGC = false

@@ -26,8 +26,12 @@ Layer 1 prototype; its JSON verdict can be evaluated with `host_integrity.evalua
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+python deepfake_detector.py --fetch    # once: GenD weights (Gate 3) into models/hf/; later loads are offline
 streamlit run app.py
 ```
+
+Gates 1 and 2 have no learned weights. The app preloads the Gate 3 model in the background at startup
+(~3 s on a GPU), and the live video is streamed as MJPEG from `/api/live.mjpg`, at the camera's frame rate.
 
 The **Live** page runs every check continuously on the camera, on one screen: live video, the verdict,
 a tile per gate, the fingerprint and motion scores over the last minute, the latest liveness pattern,
@@ -61,7 +65,9 @@ Results are written to `benchmarks/results/BENCHMARK_RESULTS.md`.
 ## Repository layout
 
 ```
-app.py                              Streamlit entry point (top navigation)
+app.py                              Server entry point: live MJPEG route, model preload (streamlit run app.py)
+streamlit_app.py                    Streamlit UI (top navigation)
+deepfake_detector.py                Gate 3: GenD face-deepfake model; --fetch caches weights in models/hf/
 app_pages/                          Live (main), Analyze a file, Device
 live_engine.py                      Real-time engine: capture + challenge thread, rolling analysis thread
 ui.py                               Shared verdict / gate-strip rendering (file analysis)

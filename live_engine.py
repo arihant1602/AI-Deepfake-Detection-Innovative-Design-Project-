@@ -50,6 +50,12 @@ _registry: dict = {}
 _registry_lock = threading.Lock()
 
 
+def get_engine(node: str) -> Optional["LiveEngine"]:
+    """The engine currently holding `node`, if any (used by the MJPEG route in app.py)."""
+    with _registry_lock:
+        return _registry.get(node)
+
+
 def _shutdown_all():
     with _registry_lock:
         engines = list(_registry.values())
@@ -78,6 +84,7 @@ class LiveEngine:
         self.running = False
         self.stop_reason: Optional[str] = None
         self.fps = 0.0
+        self._frames_read = 0
         self.in_challenge = False
         self.next_challenge = 0.0
 
@@ -183,6 +190,7 @@ class LiveEngine:
             else:
                 frame = real
             now = time.time()
+            self._frames_read += 1
             self.buffer.append((now, frame, during_challenge, injected))
             self.latest, self.latest_t = frame, now
         return (frame, ts) if with_timestamp else frame
@@ -199,7 +207,7 @@ class LiveEngine:
             for _ in range(10):
                 self._read(cap, False)
             self.next_challenge = time.time()
-            n, t0 = 0, time.time()
+            n0, t0 = self._frames_read, time.time()
             while not self.stop_evt.is_set():
                 if time.time() - self.last_seen > HEARTBEAT_TIMEOUT:
                     self.stop("page not visible; camera released")
@@ -212,9 +220,9 @@ class LiveEngine:
                 if self._read(cap, False) is None:
                     self.log("block", "Camera stopped delivering frames")
                     break
-                n += 1
-                if time.time() - t0 >= 1.0:
-                    self.fps, n, t0 = n / (time.time() - t0), 0, time.time()
+                if time.time() - t0 >= 1.0:  # every frame read, challenge frames included
+                    self.fps = (self._frames_read - n0) / (time.time() - t0)
+                    n0, t0 = self._frames_read, time.time()
         finally:
             cap.release()
             self.running = False
@@ -330,3 +338,21 @@ class LiveEngine:
     def frame(self) -> tuple:
         with self.lock:
             return self.latest, self.latest_t
+
+    def annotated(self, frame: np.ndarray) -> np.ndarray:
+        """`frame` with the face box, liveness-check border, attack banner and frame rate drawn on."""
+        img = frame.copy()
+        hgt, wid = img.shape[:2]
+        if self.face_box is not None:
+            x, y, w, hh = self.face_box
+            cv2.rectangle(img, (x, y), (x + w, y + hh), (214, 120, 42), 2)
+        if self.in_challenge:
+            cv2.rectangle(img, (2, 2), (wid - 3, hgt - 3), (52, 104, 235), 6)
+            cv2.putText(img, "LIVENESS CHECK", (16, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (52, 104, 235), 2, cv2.LINE_AA)
+        if self.injection != "none":
+            cv2.rectangle(img, (0, hgt - 40), (wid, hgt), (40, 40, 200), -1)
+            cv2.putText(img, f"SIMULATED ATTACK: {INJECTIONS[self.injection]}", (14, hgt - 13),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(img, f"{self.fps:.0f} fps", (wid - 86, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 2,
+                    cv2.LINE_AA)
+        return img

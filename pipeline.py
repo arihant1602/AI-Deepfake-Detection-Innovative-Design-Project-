@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -47,6 +48,7 @@ except ImportError:
 
 MIN_TEMPORAL_FACE_FRAMES = 8  # legacy temporal heuristic abstains below this many face frames
 _deepfake_detector = None
+_deepfake_lock = threading.Lock()
 
 VERDICT_AUTHENTIC = "AUTHENTIC LIVE STREAM"
 VERDICT_NO_ANOMALY = "NO ANOMALY DETECTED"
@@ -249,15 +251,19 @@ def check_temporal_coherence(video_path: Optional[str] = None, frames: Optional[
 
 
 def get_deepfake_detector():
-    """GenD detector, loaded once per process (~6 s, ~1.2 GB GPU memory). Returns the error if unavailable."""
+    """
+    GenD detector, loaded once per process (~3 s, ~1.2 GB GPU memory). Returns the error if unavailable.
+    Thread-safe: the app preloads it at startup while a live session may already be waiting for it.
+    """
     global _deepfake_detector
-    if _deepfake_detector is None:
-        try:
-            import deepfake_detector as dd
-            _deepfake_detector = dd.DeepfakeDetector(dd.CONFIG["backbone"])
-        except Exception as e:  # torch / weights / GPU missing: Gate 3 abstains instead of crashing
-            _deepfake_detector = e
-    return _deepfake_detector
+    with _deepfake_lock:
+        if _deepfake_detector is None:
+            try:
+                import deepfake_detector as dd
+                _deepfake_detector = dd.DeepfakeDetector(dd.CONFIG["backbone"])
+            except Exception as e:  # torch / weights / GPU missing: Gate 3 abstains instead of crashing
+                _deepfake_detector = e
+        return _deepfake_detector
 
 
 def check_deepfake(video_path: Optional[str] = None, frames: Optional[Sequence[np.ndarray]] = None,

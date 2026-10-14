@@ -1,4 +1,5 @@
 import time
+from urllib.parse import quote
 
 import altair as alt
 import cv2
@@ -140,38 +141,24 @@ def overall(states: list[dict]) -> tuple[str, str, str]:
 
 
 # --------------------------------------------------------------------------- #
-# Live video (fast refresh)
+# Live video
 # --------------------------------------------------------------------------- #
 
-@st.fragment(run_every=0.15 if running else None)
 def video():
+    """
+    While running, the browser pulls an MJPEG stream from app.py's /api/live.mjpg route, so the
+    picture updates at the camera's frame rate without any Streamlit rerun.
+    """
     e: LiveEngine | None = st.session_state.get("engine")
-    if e is not None and not e.running and running:
-        st.rerun(scope="app")  # the engine stopped itself: switch the whole page to idle (stops polling)
     if e is None or not e.running:
         blank = np.full((480, 640, 3), 24, np.uint8)
         msg = "Camera off" if e is None else f"Camera off: {e.stop_reason or 'stopped'}"
         cv2.putText(blank, msg, (24, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (170, 170, 170), 2, cv2.LINE_AA)
         st.image(blank, channels="BGR", output_format="JPEG", width="stretch", alt="Camera off")
         return
-    e.heartbeat()
-    frame, _ = e.frame()
-    if frame is None:
-        return
-    img = frame.copy()
-    hgt, wid = img.shape[:2]
-    if e.face_box is not None:
-        x, y, w, hh = e.face_box
-        cv2.rectangle(img, (x, y), (x + w, y + hh), (214, 120, 42), 2)
-    if e.in_challenge:
-        cv2.rectangle(img, (2, 2), (wid - 3, hgt - 3), (52, 104, 235), 6)
-        cv2.putText(img, "LIVENESS CHECK", (16, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (52, 104, 235), 2, cv2.LINE_AA)
-    if e.injection != "none":
-        cv2.rectangle(img, (0, hgt - 40), (wid, hgt), (40, 40, 200), -1)
-        cv2.putText(img, f"SIMULATED ATTACK: {INJECTIONS[e.injection]}", (14, hgt - 13), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(img, f"{e.fps:.0f} fps", (wid - 86, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 2, cv2.LINE_AA)
-    st.image(img, channels="BGR", output_format="JPEG", width="stretch", alt="Live camera")
+    src = f"/api/live.mjpg?node={quote(e.node)}&session={e.started:.0f}"
+    st.html(f'<img src="{src}" alt="Live camera" width="{e.width}" height="{e.height}" '
+            f'style="display:block;width:100%;height:auto;aspect-ratio:{e.width}/{e.height};background:#181818;border-radius:4px">')
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +168,10 @@ def video():
 @st.fragment(run_every=1.0 if running else None)
 def tiles():
     e: LiveEngine | None = st.session_state.get("engine")
+    if e is not None and not e.running and running:
+        st.rerun(scope="app")  # the engine stopped itself: switch the whole page to idle (stops polling)
+    if e is not None:
+        e.heartbeat()
     if e is None:
         st.caption("Press **Start**. The camera stays on only while this page is open and running.")
         return
