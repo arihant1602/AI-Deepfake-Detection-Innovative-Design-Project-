@@ -24,6 +24,7 @@ import secrets
 import tempfile
 import threading
 import time
+from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
 
 import cv2
@@ -31,6 +32,8 @@ import numpy as np
 import uvicorn
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
@@ -49,6 +52,10 @@ VIDEO_TYPES = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 BOUNDARY = "frame"
 POLL_S = 0.004       # how often to look for a new camera frame
 JPEG_QUALITY = 80
+
+# Hostnames the server answers to. Rejecting any other Host header stops DNS-rebinding pages from
+# reaching the camera API; --host adds the address the server is bound to.
+ALLOWED_HOSTS = {"localhost", "127.0.0.1"}
 
 _sessions: dict[str, LiveEngine] = {}   # stream token -> engine
 _sessions_lock = threading.Lock()
@@ -301,6 +308,21 @@ async def http_error(request, exc: HTTPException):
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
+class SameOriginWrites:
+    """Rejects state-changing requests sent by pages from another origin (cross-site form posts)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+            origin = dict(scope["headers"]).get(b"origin", b"").decode()
+            if origin and urlsplit(origin).hostname not in ALLOWED_HOSTS:
+                await JSONResponse({"error": "Cross-origin request refused."}, status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 class SPAFiles(StaticFiles):
     """Serves web/dist, falling back to index.html for client-side routes."""
 
@@ -344,7 +366,9 @@ routes = [
 if os.path.isdir(DIST):
     routes.append(Mount("/", SPAFiles(directory=DIST, html=True)))
 
-app = Starlette(routes=routes, lifespan=lifespan, exception_handlers={HTTPException: http_error})
+app = Starlette(routes=routes, lifespan=lifespan, exception_handlers={HTTPException: http_error},
+                middleware=[Middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS),
+                            Middleware(SameOriginWrites)])
 
 
 if __name__ == "__main__":
@@ -352,6 +376,8 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8501)
     args = parser.parse_args()
+    if args.host not in ("0.0.0.0", "::"):
+        ALLOWED_HOSTS.add(args.host)
     if not os.path.isdir(DIST):
         print("web/dist is missing: run `npm install && npm run build` in web/ (or `npm run dev` for development).")
     uvicorn.run(app, host=args.host, port=args.port)
