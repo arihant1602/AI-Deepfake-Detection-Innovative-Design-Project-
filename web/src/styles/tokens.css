@@ -1,31 +1,39 @@
-/* Design tokens. Three brand colours, each with one job:
-   ivory is the paper, blue is structure and "this passed", coral is "look here: this failed". */
+/* Design tokens. Brand colours keep one job each: ivory is the ground, blue is structure and
+   "passed", coral is "failed / under attack". Components use the semantic tokens below, which
+   switch for dark mode. */
 :root {
   --ivory: #eae6de;
-  --ivory-deep: #ded8cc;    /* recessed surfaces: wells, empty video */
-  --ivory-line: #cfc7b8;    /* hairlines on ivory */
   --blue: #226192;
-  --blue-deep: #1a4c74;     /* hover / pressed blue */
-  --blue-ink: #0f2f4a;      /* text on light blue tints */
   --coral: #e58557;
-  --coral-deep: #c8653a;    /* coral text on ivory (contrast) */
-  --ink: #18222e;           /* body text: a blue-black, so it sits with the accent */
-  --ink-soft: #4a5562;
-  --ink-faint: #7b8490;
+
+  --bg: var(--ivory);
+  --surface: #e2ddd3;          /* panels sunk slightly below the ground */
+  --surface-2: #d8d2c6;        /* inputs, hover */
+  --line: #c9c1b2;
+  --line-strong: #18222e;
+  --text: #18222e;
+  --text-soft: #4a5562;
+  --text-faint: #7b8490;
+  --accent: var(--blue);       /* blue as text/lines: passes contrast on ivory */
+  --accent-fill: var(--blue);  /* blue as a fill behind ivory text */
+  --on-accent: var(--ivory);
+  --alert: var(--coral);
+  --alert-text: #b4552a;       /* coral as text on the ground */
+  --on-alert: #18222e;
+  --video-bg: #0f1a24;
+  --grain-opacity: 0.14;
+  --grain-blend: multiply;
 
   --font-display: "Archivo", "Arial Narrow", system-ui, sans-serif;
   --font-serif: "Instrument Serif", "Iowan Old Style", Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
-  /* Type scale: a 4:3 ratio from 16px. */
   --step--2: 0.6875rem;
   --step--1: 0.8125rem;
-  --step-0: 1rem;
-  --step-1: 1.333rem;
-  --step-2: 1.777rem;
-  --step-3: 2.369rem;
-  --step-4: 3.157rem;
-  --display: clamp(3.4rem, 8vw, 7.4rem);
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.25rem;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -34,15 +42,55 @@
   --space-5: 24px;
   --space-6: 32px;
   --space-7: 48px;
-  --space-8: 72px;
-  --space-9: 112px;
 
-  --gutter: clamp(16px, 4vw, 56px);
-  --max: 1440px;
-  --radius: 2px;
+  --topbar-h: 56px;
+  --gutter: 16px;
+  --radius: 3px;
   --ease: cubic-bezier(0.2, 0.7, 0.1, 1);
 
-  /* Paper grain, generated rather than loaded: the same kind of noise Gate 2 looks for. */
+  /* Generated sensor-style grain: used on the verdict swatch, the video frame and the page. */
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  --crumple: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600'%3E%3Cfilter id='c'%3E%3CfeTurbulence type='turbulence' baseFrequency='.006 .011' numOctaves='4' seed='7'/%3E%3CfeDiffuseLighting lighting-color='%23fff' surfaceScale='3.2'%3E%3CfeDistantLight azimuth='225' elevation='52'/%3E%3C/feDiffuseLighting%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23c)'/%3E%3C/svg%3E");
+
+  color-scheme: light;
+}
+
+/* Dark: an ink-blue console. Blue is lifted so it still reads as text and lines on the dark ground. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1a24;
+    --surface: #142331;
+    --surface-2: #1b2d3e;
+    --line: #253a4d;
+    --line-strong: #8fa1b3;
+    --text: #e6e1d7;
+    --text-soft: #a9b3bd;
+    --text-faint: #6f7d8a;
+    --accent: #6aa6d8;
+    --accent-fill: var(--blue);
+    --on-accent: #eae6de;
+    --alert-text: #f0a07a;
+    --video-bg: #070d13;
+    --grain-opacity: 0.08;
+    --grain-blend: screen;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0f1a24;
+  --surface: #142331;
+  --surface-2: #1b2d3e;
+  --line: #253a4d;
+  --line-strong: #8fa1b3;
+  --text: #e6e1d7;
+  --text-soft: #a9b3bd;
+  --text-faint: #6f7d8a;
+  --accent: #6aa6d8;
+  --accent-fill: var(--blue);
+  --on-accent: #eae6de;
+  --alert-text: #f0a07a;
+  --video-bg: #070d13;
+  --grain-opacity: 0.08;
+  --grain-blend: screen;
+  color-scheme: dark;
 }

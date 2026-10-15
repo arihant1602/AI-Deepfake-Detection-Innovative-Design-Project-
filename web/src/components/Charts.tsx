@@ -73,7 +73,9 @@ export function Timeline({ points, threshold, yMax, label, format = (v) => v.toF
           {last && <circle className="chart__head" cx={x(last.t)} cy={y(last.v)} r={4.5} />}
         </svg>
       )}
-      {recent.length === 0 && <p className="chart__empty">Waiting for the first reading</p>}
+      {recent.length === 0 && <p className="chart__empty">
+          <span>waiting for the first reading</span>
+        </p>}
     </div>
   );
 }

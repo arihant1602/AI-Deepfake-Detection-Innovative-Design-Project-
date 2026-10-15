@@ -12,25 +12,23 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
-  background-color: var(--ivory);
-  color: var(--ink);
+  background-color: var(--bg);
+  color: var(--text);
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 100;
   font-size: var(--step-0);
-  line-height: 1.5;
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
 }
 
-/* A faint grain over the whole page so the ivory reads as paper, not as a flat fill. */
+/* Faint sensor grain over everything, so the flat fills read as a surface. */
 body::before {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
   background-image: var(--grain);
-  opacity: 0.16;
-  mix-blend-mode: multiply;
+  opacity: var(--grain-opacity);
+  mix-blend-mode: var(--grain-blend);
   z-index: 100;
 }
 
@@ -73,13 +71,13 @@ a {
 }
 
 :focus-visible {
-  outline: 2px solid var(--coral);
-  outline-offset: 3px;
+  outline: 2px solid var(--alert);
+  outline-offset: 2px;
 }
 
 ::selection {
-  background: var(--blue);
-  color: var(--ivory);
+  background: var(--accent-fill);
+  color: var(--on-accent);
 }
 
 .visually-hidden {
@@ -91,51 +89,32 @@ a {
   white-space: nowrap;
 }
 
-/* Shared text roles. */
-.serif {
-  font-family: var(--font-serif);
-  font-weight: 400;
-}
-
 .mono {
   font-family: var(--font-mono);
   font-size: var(--step--1);
-  letter-spacing: 0;
 }
 
-.lede {
-  font-family: var(--font-serif);
-  font-size: var(--step-2);
-  line-height: 1.18;
-  max-width: 28ch;
-}
-
-.prose {
+/* Serif is reserved for plain-language explanation. */
+.explain {
   font-family: var(--font-serif);
   font-size: var(--step-1);
-  line-height: 1.45;
-  max-width: 60ch;
-  color: var(--ink-soft);
+  line-height: 1.35;
+  color: var(--text-soft);
+  max-width: 62ch;
 }
 
-.page {
-  width: 100%;
-  max-width: var(--max);
-  margin: 0 auto;
-  padding: 0 var(--gutter) var(--space-9);
-}
-
-.section-title {
+.hint {
   font-family: var(--font-serif);
-  font-size: var(--step-3);
-  line-height: 1.1;
-  font-weight: 400;
+  font-style: italic;
+  font-size: var(--step-0);
+  line-height: 1.35;
+  color: var(--text-soft);
 }
 
 .error-text {
-  font-family: var(--font-serif);
-  font-size: var(--step-1);
-  color: var(--coral-deep);
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  color: var(--alert-text);
 }
 
 @media (prefers-reduced-motion: reduce) {

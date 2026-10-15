@@ -3,9 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#EAE6DE" />
     <title>Grain — live video verification</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script>
+      // Apply a saved theme before first paint, so dark-mode viewers never see an ivory flash.
+      try {
+        var t = localStorage.getItem("grain-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

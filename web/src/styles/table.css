@@ -1,4 +1,4 @@
-/* Data tables (device list, environment checks). */
+/* Dense data tables. */
 
 .table-wrap {
   overflow-x: auto;
@@ -7,38 +7,39 @@
 .table {
   width: 100%;
   border-collapse: collapse;
+  font-family: var(--font-mono);
   font-size: var(--step--1);
 }
 
 .table th {
   padding: var(--space-2) var(--space-4) var(--space-2) 0;
-  border-bottom: 1.5px solid var(--ink);
-  font-family: var(--font-serif);
-  font-weight: 400;
-  font-size: var(--step-0);
+  border-bottom: 1px solid var(--line-strong);
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 125;
+  font-weight: 700;
+  font-size: var(--step--2);
+  color: var(--text-soft);
   text-align: left;
   white-space: nowrap;
 }
 
 .table td {
-  padding: var(--space-3) var(--space-4) var(--space-3) 0;
-  border-bottom: 1px solid var(--ivory-line);
+  padding: var(--space-2) var(--space-4) var(--space-2) 0;
+  border-bottom: 1px solid var(--line);
   vertical-align: top;
 }
 
-.table td.mono {
-  font-size: var(--step--2);
+.table td.text {
+  font-family: var(--font-display);
 }
 
 .table tr.is-bad td:first-child {
-  box-shadow: inset 4px 0 0 var(--coral);
+  box-shadow: inset 3px 0 0 var(--alert);
   padding-left: var(--space-3);
 }
 
 .table__why {
   display: block;
-  margin-top: var(--space-1);
-  font-family: var(--font-serif);
-  font-style: italic;
-  color: var(--coral-deep);
+  margin-top: 2px;
+  color: var(--alert-text);
 }

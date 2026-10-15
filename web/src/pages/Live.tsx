@@ -1,38 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, type LiveSession, type Meta, type Snapshot } from "../lib/api";
 import { liveGates, liveVerdict, type GateState } from "../lib/gates";
-import { StackWord } from "../components/StackWord";
-import { GrainPanel } from "../components/GrainPanel";
-import { GateRow } from "../components/GateRow";
+import { TopBarControls } from "../components/Header";
+import { Verdict } from "../components/Verdict";
+import { Pipeline } from "../components/Pipeline";
 import { FlashChart, Timeline } from "../components/Charts";
 import { EventLog } from "../components/EventLog";
 import "./Live.css";
 
 const POLL_MS = 1000;
+const CHART_H = 112;
 
 // What each check does, shown before the camera starts.
 const IDLE_GATES: GateState[] = [
-  { gate: "1a", name: "Real camera connected", status: "off", label: "A physical camera, not OBS, an emulator or a hooked driver" },
-  { gate: "1b", name: "Camera is live", status: "off", label: "Every 10 s we flicker the camera's brightness. Only a live sensor follows" },
-  { gate: "2", name: "Has real camera grain", status: "off", label: "Real sensors add fresh grain to every frame. Generated video is too clean" },
-  { gate: "3", name: "Face looks real", status: "off", label: "An AI detector (GenD) looks for deepfake artefacts in the face" },
+  { gate: "1a", name: "Real camera connected", status: "off", label: "A physical camera, not OBS, an emulator or a hooked driver." },
+  { gate: "1b", name: "Camera is live", status: "off", label: "We flicker the camera's brightness; only a live sensor follows." },
+  { gate: "2", name: "Has real camera grain", status: "off", label: "Real sensors add fresh grain to every frame; generated video is too clean." },
+  { gate: "3", name: "Face looks real", status: "off", label: "GenD looks for deepfake artefacts in the face." },
 ];
 
-function PlayIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M8 5.5v13l10.5-6.5z" fill="currentColor" />
-    </svg>
-  );
-}
-
-function StopIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="6.5" y="6.5" width="11" height="11" fill="currentColor" />
-    </svg>
-  );
-}
+const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 export function Live() {
   const [meta, setMeta] = useState<Meta | null>(null);
@@ -131,197 +118,194 @@ export function Live() {
 
   const gates = snap ? liveGates(snap) : null;
   const verdict = liveVerdict(gates, snap);
-  const device = meta?.devices.find((d) => d.node === node);
-  const latestAttempt = snap?.challenges[0]?.attempt;
   const thr = snap?.deepfake_threshold ?? 0.5;
   const noiseT = meta?.noise_threshold ?? 0.6;
   const noiseMax = Math.max(2, ...(snap?.noise.map((n) => (n.sigma ?? 0) * 1.2) ?? []));
+  const lastFlash = snap?.challenges[0];
+  const attacked = Boolean(snap?.injection && snap.injection !== "none");
 
   return (
-    <main className="page live">
-      <section className="live-hero" aria-labelledby="verdict-title">
-        <div className="live-hero__copy">
-          <p className="live-hero__intro">
-            A live camera leaves fresh grain in every frame and answers when you flicker its light. A fake can't do
-            either.
-          </p>
-          <StackWord word={verdict.word} status={verdict.status} />
-          <div className="live-hero__verdict" aria-live="polite">
-            <h2 id="verdict-title" className="live-hero__title">
-              {verdict.title}
-            </h2>
-            {verdict.line && <p className="live-hero__line">{verdict.line}</p>}
-          </div>
+    <main className="console">
+      <TopBarControls>
+        {meta && meta.devices.length > 0 ? (
+          <label className="console__camera">
+            <span className="visually-hidden">Camera</span>
+            <select className="select" value={node} disabled={running || busy} onChange={(e) => setNode(e.target.value)}>
+              {meta.devices.map((d) => (
+                <option key={d.node} value={d.node}>
+                  {d.node} · {d.name}
+                  {d.is_virtual ? " (software camera)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          meta && <span className="error-text">No camera found</span>
+        )}
+        {running && snap ? (
+          <span className="chip chip--live console__status">
+            LIVE {snap.fps.toFixed(0)} fps · {clock(snap.now - snap.started)}
+          </span>
+        ) : (
+          <span className="chip console__status">{snap?.stop_reason ? "stopped" : "idle"}</span>
+        )}
+        {running ? (
+          <button className="btn btn--alert" onClick={stop} disabled={busy}>
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <rect x="2" y="2" width="10" height="10" fill="currentColor" />
+            </svg>
+            Stop
+          </button>
+        ) : (
+          <button className="btn btn--primary" onClick={start} disabled={busy || !node}>
+            <svg viewBox="0 0 14 14" aria-hidden="true">
+              <path d="M3 1.5v11l9-5.5z" fill="currentColor" />
+            </svg>
+            {busy ? "Opening…" : "Start"}
+          </button>
+        )}
+      </TopBarControls>
 
-          <div className="live-hero__controls">
-            {running ? (
-              <button className="orb orb--stop" onClick={stop} disabled={busy}>
-                <span className="orb__ring">
-                  <StopIcon />
-                </span>
-                <span className="orb__label">
-                  Stop checking
-                  <span className="orb__sub">releases {snap?.node}</span>
-                </span>
-              </button>
+      <div className="console-grid console__grid">
+        {/* ---------------------------------------------------------------- video */}
+        <section className="panel console__video" aria-label="Camera">
+          <div className="panel__head">
+            <h2 className="label">Camera feed</h2>
+            <span className="panel__aside">{snap?.camera_id ?? session?.node ?? node}</span>
+          </div>
+          <div className={`feed ${attacked ? "feed--attacked" : ""} ${snap?.in_challenge ? "feed--flash" : ""}`}>
+            {running && session ? (
+              <img
+                key={session.token}
+                src={api.streamUrl(session.token)}
+                width={session.width}
+                height={session.height}
+                alt="Live camera, with the detected face outlined"
+              />
             ) : (
-              <button className="orb" onClick={start} disabled={busy || !node}>
-                <span className="orb__ring">
-                  <PlayIcon />
-                </span>
-                <span className="orb__label">
-                  {busy ? "Opening camera" : "Start checking"}
-                  <span className="orb__sub">{device ? device.name : "no camera found"}</span>
-                </span>
-              </button>
-            )}
-            {meta && meta.devices.length > 1 && (
-              <label className="field live-hero__camera">
-                <span className="visually-hidden">Camera</span>
-                <select className="select" value={node} disabled={running || busy} onChange={(e) => setNode(e.target.value)}>
-                  {meta.devices.map((d) => (
-                    <option key={d.node} value={d.node}>
-                      {d.name} ({d.node}){d.is_virtual ? ", software camera" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div className="feed__off">
+                <span className="mono">{snap?.stop_reason ? `stopped: ${snap.stop_reason}` : "camera off"}</span>
+                {!snap && <span className="hint">Press Start. The camera stays on only while this page is open.</span>}
+              </div>
             )}
           </div>
-          {meta && meta.devices.length === 0 && (
-            <p className="error-text">No video-capture device found. Plug in a webcam and reload.</p>
-          )}
-          {error && <p className="error-text" role="alert">{error}</p>}
-        </div>
-
-        <GrainPanel className="live-hero__panel">
-          <p className="live-hero__side">
-            {running ? `${snap?.fps.toFixed(0)} fps` : "Camera off"}
-            <br />
-            {snap?.camera_id ?? device?.node ?? ""}
-          </p>
-          <p className="live-hero__foot mono">
-            {running && snap
-              ? snap.in_challenge
-                ? "Flash test running"
-                : `Next flash test in ${Math.round(snap.next_challenge_in)} s`
-              : "Video stays on this machine"}
-          </p>
-        </GrainPanel>
-
-        <figure className={`live-hero__video ${snap?.injection && snap.injection !== "none" ? "is-attacked" : ""}`}>
-          {running && session ? (
-            <img
-              key={session.token}
-              src={api.streamUrl(session.token)}
-              width={session.width}
-              height={session.height}
-              alt="Live camera, with the detected face outlined"
-            />
-          ) : (
-            <div className="live-hero__off" style={{ aspectRatio: "4 / 3" }}>
-              <span>{snap?.stop_reason ? `Stopped: ${snap.stop_reason}` : "Camera off"}</span>
-            </div>
-          )}
-        </figure>
-      </section>
-
-      {running && meta && (
-        <section className="live-tools" aria-label="Test controls">
-          <div className="live-tools__group">
-            <h2 className="live-tools__title">Simulate an attack</h2>
-            <p className="field__hint">
-              Swaps the frames after the camera driver, like a hooked capture call. The real camera still gets the
-              flash test.
+          {error && (
+            <p className="error-text" role="alert">
+              {error}
             </p>
-            <div className="choices" role="group" aria-label="Simulated attack">
-              {Object.entries(meta.injections).map(([key, label]) => (
+          )}
+        </section>
+
+        {/* ---------------------------------------------------------------- verdict + pipeline */}
+        <aside className="panel console__side" aria-label="Verdict">
+          <h2 className="label">Verdict</h2>
+          <Verdict verdict={verdict} />
+          <div className="console__rule" />
+          <div className="panel__head">
+            <h2 className="label">Pipeline</h2>
+            <span className="panel__aside">runs top to bottom</span>
+          </div>
+          <Pipeline gates={gates ?? IDLE_GATES} gatedLabel="gated off" />
+        </aside>
+
+        {/* ---------------------------------------------------------------- attack dock */}
+        <section className="panel console__dock" aria-label="Test controls">
+          <div className="dock__group">
+            <h2 className="label">Simulate an attack</h2>
+            <div className="segmented segmented--attack" role="group" aria-label="Simulated attack">
+              {Object.entries(meta?.injections ?? { none: "Off" }).map(([key, label]) => (
                 <button
                   key={key}
-                  className={`choice ${key === "none" ? "" : "choice--attack"}`}
-                  aria-pressed={snap?.injection === key}
+                  data-key={key}
+                  aria-pressed={(snap?.injection ?? "none") === key}
+                  disabled={!running}
                   onClick={() => attack(key)}
+                  title={label}
                 >
-                  {key === "none" ? "No attack" : label}
+                  {{ none: "off", replay: "replay", ai: "AI video", photo: "animated photo" }[key] ?? label}
                 </button>
               ))}
             </div>
+            <p className="hint">Swaps frames after the camera driver, like a hooked capture call.</p>
           </div>
-          <div className="live-tools__group live-tools__group--end">
-            <button className="btn" onClick={() => session && api.challenge(session.token)} disabled={snap?.in_challenge}>
-              Run the flash test now
+          <div className="dock__group dock__group--end">
+            <h2 className="label">Flash test</h2>
+            <button
+              className="btn"
+              onClick={() => session && api.challenge(session.token)}
+              disabled={!running || snap?.in_challenge}
+            >
+              Run now
             </button>
-            <p className="field__hint">The picture flickers for a moment. That is the test.</p>
+            <p className="mono dock__next">
+              {running && snap ? (snap.in_challenge ? "running" : `next in ${Math.round(snap.next_challenge_in)} s`) : "—"}
+            </p>
           </div>
         </section>
-      )}
 
-      <section className="live-section" aria-labelledby="checks-title">
-        <h2 id="checks-title" className="section-title">
-          {snap ? "The four checks, right now" : "Four checks, run continuously"}
-        </h2>
-        <GateRow gates={gates ?? IDLE_GATES} live={Boolean(gates)} />
-      </section>
+        {/* ---------------------------------------------------------------- signal strip */}
+        <figure className="panel console__signal">
+          <figcaption className="panel__head">
+            <span className="label">Camera grain</span>
+            <span className="panel__aside">
+              {snap?.noise.at(-1)?.sigma != null ? `σ ${snap.noise.at(-1)!.sigma!.toFixed(2)}` : "—"} / min {noiseT}
+            </span>
+          </figcaption>
+          <Timeline
+            now={snap?.now ?? 0}
+            height={CHART_H}
+            label="Live sensor noise level over the last minute; real cameras stay above the dashed line"
+            threshold={noiseT}
+            yMax={noiseMax}
+            points={(snap?.noise ?? [])
+              .filter((n) => n.sigma !== null)
+              .map((n) => ({ t: n.t, v: n.sigma as number, bad: n.verdict === "ABSENT" }))}
+          />
+        </figure>
 
-      {snap && (
-        <section className="live-section live-readings" aria-labelledby="readings-title">
-          <h2 id="readings-title" className="section-title">
-            The last minute
-          </h2>
-          <div className="readings">
-            <figure className="reading">
-              <figcaption>
-                <span className="reading__name">Camera grain</span>
-                <span className="reading__how">Real cameras stay above the dashed line. Coral dots failed.</span>
-              </figcaption>
-              <Timeline
-                now={snap.now}
-                label="Live sensor noise level over the last minute"
-                threshold={noiseT}
-                yMax={noiseMax}
-                points={snap.noise
-                  .filter((n) => n.sigma !== null)
-                  .map((n) => ({ t: n.t, v: n.sigma as number, bad: n.verdict === "ABSENT" }))}
-              />
-            </figure>
-            <figure className="reading">
-              <figcaption>
-                <span className="reading__name">AI-face score</span>
-                <span className="reading__how">Above the dashed line looks fake. Hollow dots: no face in view.</span>
-              </figcaption>
-              <Timeline
-                now={snap.now}
-                label="Probability the face is AI-generated, over the last minute"
-                threshold={thr}
-                yMax={1}
-                format={(v) => `${Math.round(v * 100)}%`}
-                points={snap.deepfake
-                  .filter((d) => d.p !== null || d.abstained)
-                  .map((d) => ({ t: d.t, v: d.p ?? 0, bad: d.p !== null && d.p >= thr, muted: d.abstained }))}
-              />
-            </figure>
-            <figure className="reading">
-              <figcaption>
-                <span className="reading__name">Last flash test</span>
-                <span className="reading__how">Dashed: the brightness we sent. Blue: what the video did.</span>
-              </figcaption>
-              {latestAttempt ? (
-                <FlashChart attempt={latestAttempt} />
-              ) : (
-                <p className="reading__wait">The first test runs a second after Start.</p>
-              )}
-              {snap.challenges[0]?.corr !== undefined && (
-                <p className="mono reading__value">r = {snap.challenges[0].corr.toFixed(2)}</p>
-              )}
-            </figure>
+        <figure className="panel console__signal">
+          <figcaption className="panel__head">
+            <span className="label">AI-face score</span>
+            <span className="panel__aside">
+              {snap?.deepfake_smoothed != null ? `${Math.round(snap.deepfake_smoothed * 100)}%` : "—"} / max{" "}
+              {Math.round(thr * 100)}%
+            </span>
+          </figcaption>
+          <Timeline
+            now={snap?.now ?? 0}
+            height={CHART_H}
+            label="Probability the face is AI-generated over the last minute; above the dashed line looks fake"
+            threshold={thr}
+            yMax={1}
+            format={(v) => `${Math.round(v * 100)}%`}
+            points={(snap?.deepfake ?? [])
+              .filter((d) => d.p !== null || d.abstained)
+              .map((d) => ({ t: d.t, v: d.p ?? 0, bad: d.p !== null && d.p >= thr, muted: d.abstained }))}
+          />
+        </figure>
+
+        <figure className="panel console__signal">
+          <figcaption className="panel__head">
+            <span className="label">Last flash test</span>
+            <span className="panel__aside">
+              {lastFlash?.corr !== undefined ? `r ${lastFlash.corr.toFixed(2)} / min 0.90` : "—"}
+            </span>
+          </figcaption>
+          {lastFlash?.attempt ? (
+            <FlashChart attempt={lastFlash.attempt} height={CHART_H} />
+          ) : (
+            <p className="signal__empty mono">dashed: brightness sent · line: brightness seen</p>
+          )}
+        </figure>
+
+        <section className="panel console__log" aria-label="Event log">
+          <div className="panel__head">
+            <h2 className="label">Event log</h2>
+            <span className="panel__aside">{snap ? `${snap.events.length} events` : ""}</span>
           </div>
-
-          <div className="live-log">
-            <h3 className="live-log__title">What happened</h3>
-            <EventLog events={snap.events} />
-          </div>
+          <EventLog events={snap?.events ?? []} />
         </section>
-      )}
+      </div>
     </main>
   );
 }

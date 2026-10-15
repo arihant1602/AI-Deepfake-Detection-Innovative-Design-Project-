@@ -1,72 +1,58 @@
-.device-head {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: end;
-  gap: var(--space-7);
-  padding: var(--space-6) 0 var(--space-7);
+.devpage {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  min-height: calc(100vh - var(--topbar-h) - 1px);
+  border-top: 0;
 }
 
-.device-head__copy {
-  display: grid;
+.devpage__main,
+.devpage__side {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--line);
+}
+
+/* The last panel in each column takes the leftover height, so no rule-coloured gap shows. */
+.devpage__main > .panel:last-child,
+.devpage__side > .panel:last-child {
+  flex: 1;
+}
+
+.devpage__main .panel,
+.devpage__side .panel {
   gap: var(--space-4);
-  justify-items: start;
-  padding-bottom: var(--space-2);
-}
-
-.device-section {
-  display: grid;
-  gap: var(--space-4);
-  margin-top: var(--space-7);
-}
-
-.device-split {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-7);
-  align-items: start;
-}
-
-.device-split > div {
-  display: grid;
-  gap: var(--space-4);
-}
-
-.device-attest {
-  justify-items: start;
-}
-
-.device-attest .field {
-  width: 100%;
-}
-
-.prints {
-  border-top: 1.5px solid var(--ink);
 }
 
 .prints li {
   padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--ivory-line);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--step--2);
   overflow-wrap: anywhere;
 }
 
-.attest-result {
-  padding: var(--space-3) var(--space-4);
+.prints__empty {
+  color: var(--text-faint);
+}
+
+.attest {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
   font-size: var(--step--1);
-  border-left: 4px solid var(--blue);
 }
 
-.attest-result--block {
-  border-left-color: var(--coral);
-  background: var(--coral);
+.attest--block {
+  border-left-color: var(--alert);
 }
 
-.attest-result--flag {
-  border-left-color: var(--ink);
+.attest--flag {
+  border-left-color: var(--text);
 }
 
-@media (max-width: 900px) {
-  .device-head,
-  .device-split {
-    grid-template-columns: 1fr;
-    gap: var(--space-5);
+@media (max-width: 860px) {
+  .devpage {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

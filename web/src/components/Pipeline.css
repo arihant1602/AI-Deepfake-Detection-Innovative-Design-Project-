@@ -1,0 +1,122 @@
+.pipeline {
+  display: grid;
+}
+
+.stage {
+  --node: var(--text-faint);
+  position: relative;
+  display: grid;
+  gap: 2px;
+  padding: 0 0 var(--space-4) 26px;
+}
+
+.stage:last-child {
+  padding-bottom: 0;
+}
+
+/* The connecting line runs from this node down to the next one. */
+.stage::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 14px;
+  bottom: -4px;
+  width: 2px;
+  background: var(--line);
+}
+
+.stage:last-child::before {
+  display: none;
+}
+
+.stage.is-after-fail::before {
+  background: var(--alert);
+}
+
+.stage__node {
+  position: absolute;
+  left: 0;
+  top: 3px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--node);
+  background: var(--bg);
+}
+
+.stage--pass {
+  --node: var(--accent);
+}
+
+.stage--pass .stage__node {
+  background: var(--accent);
+}
+
+.stage--block {
+  --node: var(--alert);
+}
+
+.stage--block .stage__node {
+  background: var(--alert);
+}
+
+.stage--flag {
+  --node: var(--text);
+}
+
+.stage--wait .stage__node {
+  animation: node-blink 1s steps(2) infinite;
+}
+
+@keyframes node-blink {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.stage__row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.stage__id {
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  color: var(--text-faint);
+}
+
+.stage__name {
+  font-variation-settings: "wdth" 110;
+  font-weight: 600;
+  font-size: var(--step-0);
+  line-height: 1.25;
+}
+
+.stage__label,
+.stage__meta {
+  padding-left: 44px;
+  font-size: var(--step--1);
+  line-height: 1.4;
+}
+
+.stage__label {
+  font-family: var(--font-serif);
+  font-size: var(--step-1);
+  color: var(--text-soft);
+}
+
+.stage--block .stage__label {
+  color: var(--alert-text);
+}
+
+.stage__meta {
+  font-family: var(--font-mono);
+  font-size: var(--step--2);
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+.stage.is-gated {
+  opacity: 0.5;
+}

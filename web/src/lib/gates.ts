@@ -87,7 +87,7 @@ export function liveGates(s: Snapshot): GateState[] {
 }
 
 export function liveVerdict(gates: GateState[] | null, s: Snapshot | null): Verdict {
-  if (!s) return { status: "off", word: "Ready", title: "Camera off", line: "Pick a camera and start checking." };
+  if (!s) return { status: "off", word: "Idle", title: "Camera off", line: "Pick a camera and start checking." };
   const blocked = (gates ?? []).filter((g) => g.status === "block");
   if (blocked.length)
     return {
@@ -102,7 +102,7 @@ export function liveVerdict(gates: GateState[] | null, s: Snapshot | null): Verd
   const waiting = (gates ?? []).filter((g) => g.status !== "pass").map((g) => `${g.name}: ${g.label.toLowerCase()}`);
   return {
     status: gates?.some((g) => g.status === "flag") ? "flag" : "wait",
-    word: "Wait",
+    word: "Checking",
     title: "Still checking",
     line: waiting.join(". ") + ".",
   };

@@ -1,0 +1,34 @@
+/* A console panel: hairline-bounded region with a small label in its top-left corner. */
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-4);
+  background: var(--bg);
+}
+
+.panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.panel__aside {
+  font-family: var(--font-mono);
+  font-size: var(--step--2);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* Panels sit in a grid whose gaps show the line colour, giving 1px rules between them. */
+.console-grid {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}

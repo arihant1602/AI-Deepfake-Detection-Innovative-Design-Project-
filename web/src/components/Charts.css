@@ -9,25 +9,25 @@
 }
 
 .chart__grid {
-  stroke: var(--ivory-line);
+  stroke: var(--line);
   stroke-width: 1;
 }
 
 .chart__tick {
   font-family: var(--font-mono);
   font-size: 10px;
-  fill: var(--ink-faint);
+  fill: var(--text-faint);
 }
 
 .chart__threshold {
-  stroke: var(--ink);
+  stroke: var(--text-soft);
   stroke-width: 1;
   stroke-dasharray: 4 4;
 }
 
 .chart__line {
   fill: none;
-  stroke: var(--blue);
+  stroke: var(--accent);
   stroke-width: 2;
   stroke-linejoin: round;
   stroke-linecap: round;
@@ -35,26 +35,26 @@
 
 .chart__command {
   fill: none;
-  stroke: var(--ink);
+  stroke: var(--text-soft);
   stroke-width: 1.5;
   stroke-dasharray: 3 3;
 }
 
 .chart__bad {
-  fill: var(--coral);
-  stroke: var(--ivory);
+  fill: var(--alert);
+  stroke: var(--bg);
   stroke-width: 1.5;
 }
 
 .chart__muted {
-  fill: var(--ivory);
-  stroke: var(--ink-faint);
+  fill: var(--bg);
+  stroke: var(--text-faint);
   stroke-width: 1.2;
 }
 
 .chart__head {
-  fill: var(--blue);
-  stroke: var(--ivory);
+  fill: var(--accent);
+  stroke: var(--bg);
   stroke-width: 2;
 }
 
@@ -63,7 +63,12 @@
   inset: 0;
   display: grid;
   place-items: center;
-  font-family: var(--font-serif);
-  font-style: italic;
-  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--step--2);
+  color: var(--text-faint);
+}
+
+.chart__empty span {
+  padding: 2px 8px;
+  background: var(--bg);
 }
