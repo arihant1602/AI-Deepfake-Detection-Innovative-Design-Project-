@@ -30,6 +30,15 @@ temporal noise. `K` is locked to the pixel grid and differs between sensors (Luk
    - ABSENT: z < 3 or ρ < 0.04
    - INCONCLUSIVE: less than 4% of the frame changed (highlights above 230 excluded), or anything in between
 
+## Same-sensor check (used by the app, no enrollment)
+
+`same_sensor_check()` splits by *source* instead of by time within one clip: the fingerprint of the
+frames read during a passed Gate 1b challenge (attested to come from the physical sensor) is matched
+by PCE against the fingerprint of the frames analysed afterwards. PCE ≥ 60 = same sensor. Measured on
+the 640×480 MJPEG webcam: same camera 9,600–20,000; AI clips, other cameras, an animated photo and an AI
+clip with re-added noise ≤ 14. Content from this same camera (a replay, a frozen frame) can match
+through static scene texture; Gate 1b and the live-noise test cover those.
+
 ## Why the previous version produced false positives / false negatives
 
 - Odd/even frame interleaving plus whole-frame correlation measured **static scene texture**, not

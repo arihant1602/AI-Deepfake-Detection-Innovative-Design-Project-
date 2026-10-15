@@ -13,9 +13,9 @@ The full design, threat model, measured results and limitations are in
 | Gate | Module | What it decides | Blocks when |
 |---|---|---|---|
 | 1a passive attestation | `host_integrity.py` | Is the capture node a physical USB/PCI camera? Is the environment clean? | software camera node (v4l2loopback, akvcam, vivid…), metadata node, VM/container, ptrace / `LD_PRELOAD` hook, root |
-| 1b active sensor challenge | `host_integrity.py` | Do the frames respond to a random brightness challenge sent to that sensor? | partial correlation < 0.9 (frames not produced by the challenged sensor) |
-| 2 sensor noise (PRNU) | `camera_sensor_noise_profiling.py` | Do the pixels carry the enrolled fingerprint of *the attested camera*? | PCE < 60 against the fingerprint enrolled for that camera ID + sensor mode |
-| 3 temporal / spectral | `temporal_consistency_analysis.py` | Is facial texture, lighting and motion temporally consistent? | anomaly score ≥ 0.60 |
+| 1b active sensor challenge | `host_integrity.py`, `live_engine.py` | Do the frames follow brightness plus two random controls (contrast, saturation, hue, white balance) driven on that sensor? Optional screen flash: does the screen's light show on the face? | any driven control with partial correlation < 0.85 (the screen flash only flags) |
+| 2 sensor noise | `camera_sensor_noise_profiling.py` | Do the frames carry live sensor noise, and the PRNU of the frames attested by the last challenge (split and compare, no enrollment)? | a failed noise check, or same-sensor PCE < 60 |
+| 3 face deepfake model | `deepfake_detector.py` | Does GenD-PE-L judge the aligned face crops synthetic? | median P(fake) of the last 3 s ≥ 0.5 |
 | 5 gated fusion | `pipeline.py`, `server.py` | Orchestration, early termination, final verdict | n/a |
 
 Layer 4 (rPPG) is specified but not implemented. The Android SDK in `app/src/main/java/...` is the mobile
@@ -39,8 +39,9 @@ For UI work, run `python server.py` and `npm run dev` in `web/` together: Vite s
 (`web/src/styles/` for tokens and shared rules, one stylesheet beside each component and page).
 
 The **Live** page runs every check continuously on the camera, on one screen: live video, the verdict,
-a card per gate, the camera-grain and AI-face scores over the last minute, the latest flash test,
-and an event log. Press **Start checking**. **Simulate an attack** swaps the frames for a replay, an AI
+a card per gate, the camera-grain and AI-face scores over the last minute, the latest camera test,
+and an event log. **Live test → Camera** runs the multi-control challenge now; **Screen flash** flashes
+the screen in two colours for 5 s and looks for the light on your face. Press **Start checking**. **Simulate an attack** swaps the frames for a replay, an AI
 video or an animated photo mid-stream so you can watch the checks react. The camera is released on
 **Stop checking**, when you leave the page, when the tab closes, or within 8 s of the page going quiet.
 **Analyze a file** and **Device** are secondary pages.
