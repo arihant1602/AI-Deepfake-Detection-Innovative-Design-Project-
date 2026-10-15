@@ -75,7 +75,7 @@ The earlier designs were reference PRNU matching (needs enrollment) and a blind 
   - CLIP-L was tested and rejected: it flagged 65% of real webcam windows.
   - DINOv3-L requires Meta's licence approval and was not tested.
 
-### Live engine (`live_engine.py`) and app (`app_pages/live.py`)
+### Live engine (`live_engine.py`) and app (`server.py`, `web/`)
 - A capture thread owns the camera and runs Gate 1b. An analysis thread alternates Gate 2 and Gate 3
   every 0.5 s.
 - A compute lock pauses analysis during a sensor challenge.
@@ -148,7 +148,8 @@ performance fixes) are not yet committed.**
 
 ```bash
 source .venv/bin/activate
-streamlit run app.py                      # live page; Start → checks run continuously
+cd web && npm install && npm run build && cd ..   # once, and after UI changes
+python server.py                          # http://localhost:8501; Start → checks run continuously
 python run_tests.py                       # 58 tests
 python benchmarks/run_benchmark.py        # Gate 1b / reference-PRNU benchmark
 ```
@@ -163,8 +164,9 @@ Gate 3 needs PyTorch (CUDA build for NVIDIA GPUs) and downloads GenD-PE-L (~1.2 
 | `camera_sensor_noise_profiling.py` | Gate 2 (live noise; optional reference PRNU) |
 | `deepfake_detector.py` | Gate 3 (YuNet + GenD) |
 | `pipeline.py` | Gate orchestration for files and one-shot live sessions |
-| `live_engine.py`, `app_pages/live.py` | Real-time engine and live page |
-| `ui.py`, `app_pages/analyze_file.py`, `app_pages/device.py` | File analysis and device pages |
+| `live_engine.py` | Real-time engine (capture + challenge thread, rolling analysis thread) |
+| `server.py` | JSON API, live MJPEG stream, serves the built web app |
+| `web/` | React + TypeScript front end: Live, Analyze a file, Device |
 | `temporal_consistency_analysis.py` | Original Gate 3 heuristic (kept, no longer used) |
 | `benchmarks/` | Dataset fetchers, capture script, benchmark runner, results |
 | `docs/ARCHITECTURE.md` | Long-form design history and earlier measurements |

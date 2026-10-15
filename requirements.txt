@@ -12,7 +12,9 @@ huggingface_hub
 pillow
 
 # App
-streamlit>=1.65.0   # tested with 1.65; app uses st.image(alt=...) and width="stretch"
+starlette>=1.7      # server.py: JSON API, MJPEG stream, serves web/dist
+uvicorn>=0.54
+python-multipart    # video uploads on /api/analyze
 
 # Development & testing
 pytest>=7.0.0

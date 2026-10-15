@@ -1,0 +1,65 @@
+.stack {
+  --stack-color: var(--blue);
+  display: grid;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 125;
+  font-weight: 900;
+  font-size: var(--display);
+  line-height: 0.84;
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  color: var(--stack-color);
+}
+
+.stack--page {
+  font-size: clamp(2.8rem, 7vw, 6.2rem);
+}
+
+.stack--block {
+  --stack-color: var(--coral);
+}
+
+.stack--wait,
+.stack--flag {
+  --stack-color: var(--ink);
+}
+
+.stack--off {
+  --stack-color: var(--blue);
+}
+
+.stack__outline {
+  color: transparent;
+  -webkit-text-stroke: 1.5px var(--stack-color);
+}
+
+/* The one orchestrated moment: when the verdict changes, the three lines settle in, top to bottom. */
+.stack span {
+  animation: stack-in 520ms var(--ease) both;
+}
+
+.stack span:nth-child(2) {
+  animation-delay: 70ms;
+}
+
+.stack span:nth-child(3) {
+  animation-delay: 140ms;
+}
+
+@keyframes stack-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.18em);
+  }
+}
+
+/* Pending verdicts breathe on the outlined line only, so "still checking" reads as in progress. */
+.stack--wait .stack__outline {
+  animation: stack-in 520ms var(--ease) 70ms both, stack-pulse 1.6s ease-in-out 600ms infinite;
+}
+
+@keyframes stack-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}

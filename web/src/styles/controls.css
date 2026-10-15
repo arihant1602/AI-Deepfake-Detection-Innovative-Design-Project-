@@ -1,0 +1,253 @@
+/* Buttons and form controls, shared by every page. */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding: 0 var(--space-5);
+  border: 1.5px solid var(--blue);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--blue);
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 112;
+  font-weight: 600;
+  font-size: var(--step--1);
+  cursor: pointer;
+  transition: background-color 160ms var(--ease), color 160ms var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--blue);
+  color: var(--ivory);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn--solid {
+  background: var(--blue);
+  color: var(--ivory);
+}
+
+.btn--solid:hover:not(:disabled) {
+  background: var(--blue-deep);
+  border-color: var(--blue-deep);
+}
+
+.btn--coral {
+  border-color: var(--coral);
+  background: var(--coral);
+  color: var(--ink);
+}
+
+.btn--coral:hover:not(:disabled) {
+  background: var(--coral-deep);
+  border-color: var(--coral-deep);
+  color: var(--ivory);
+}
+
+/* The big round start/stop control, after the reference's circled arrow. */
+.orb {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.orb__ring {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  flex: none;
+  border: 1.5px solid var(--ink);
+  border-radius: 50%;
+  transition: background-color 200ms var(--ease), border-color 200ms var(--ease);
+}
+
+.orb__ring svg {
+  width: 22px;
+  height: 22px;
+}
+
+.orb:hover:not(:disabled) .orb__ring {
+  background: var(--ink);
+  color: var(--ivory);
+}
+
+.orb--stop .orb__ring {
+  border-color: var(--coral);
+  background: var(--coral);
+  color: var(--ink);
+}
+
+.orb--stop:hover:not(:disabled) .orb__ring {
+  background: var(--coral-deep);
+  border-color: var(--coral-deep);
+}
+
+.orb:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.orb__label {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 118;
+  font-weight: 700;
+  font-size: var(--step-0);
+  line-height: 1.15;
+}
+
+.orb__sub {
+  display: block;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: var(--step--2);
+  color: var(--ink-soft);
+}
+
+.field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.field__label {
+  font-family: var(--font-serif);
+  font-size: var(--step-1);
+  line-height: 1.2;
+}
+
+.field__hint {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+}
+
+.select {
+  appearance: none;
+  min-height: 44px;
+  width: 100%;
+  padding: 0 40px 0 var(--space-4);
+  border: 1.5px solid var(--ink);
+  border-radius: var(--radius);
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%2318222e' stroke-width='1.6'/%3E%3C/svg%3E")
+      right 14px center no-repeat,
+    transparent;
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  cursor: pointer;
+}
+
+.select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.textarea {
+  width: 100%;
+  min-height: 140px;
+  padding: var(--space-3) var(--space-4);
+  border: 1.5px solid var(--ink);
+  border-radius: var(--radius);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+/* A row of mutually exclusive choices. */
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.choice {
+  min-height: 40px;
+  padding: 0 var(--space-4);
+  border: 1.5px solid var(--ivory-line);
+  border-radius: 999px;
+  background: transparent;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 105;
+  font-size: var(--step--1);
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 160ms var(--ease), background-color 160ms var(--ease);
+}
+
+.choice:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+.choice[aria-pressed="true"] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--ivory);
+}
+
+.choice--attack[aria-pressed="true"] {
+  border-color: var(--coral);
+  background: var(--coral);
+  color: var(--ink);
+}
+
+.choice:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Collapsible detail sections. */
+.fold {
+  border-top: 1px solid var(--ivory-line);
+}
+
+.fold:last-child {
+  border-bottom: 1px solid var(--ivory-line);
+}
+
+.fold > summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+  font-family: var(--font-serif);
+  font-size: var(--step-1);
+  cursor: pointer;
+  list-style: none;
+}
+
+.fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fold > summary::after {
+  content: "+";
+  font-family: var(--font-mono);
+  font-size: var(--step-1);
+  color: var(--blue);
+  transition: transform 200ms var(--ease);
+}
+
+.fold[open] > summary::after {
+  transform: rotate(45deg);
+}
+
+.fold__body {
+  display: grid;
+  gap: var(--space-4);
+  padding: 0 0 var(--space-5);
+}

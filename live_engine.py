@@ -52,7 +52,7 @@ _registry_lock = threading.Lock()
 
 
 def get_engine(node: str) -> Optional["LiveEngine"]:
-    """The engine currently holding `node`, if any (used by the MJPEG route in app.py)."""
+    """The engine currently holding `node`, if any (used by the MJPEG route in server.py)."""
     with _registry_lock:
         return _registry.get(node)
 
@@ -70,7 +70,7 @@ atexit.register(_shutdown_all)
 class LiveEngine:
     def __init__(self, node: str, width: int = 640, height: int = 480):
         self.node, self.width, self.height = node, width, height
-        # Capability for the MJPEG route: only the Streamlit session that started the engine knows it.
+        # Capability for the MJPEG route: only the browser that started the engine knows it.
         self.stream_token = secrets.token_urlsafe(24)
         self.lock = threading.Lock()
         self.stop_evt = threading.Event()

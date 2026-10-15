@@ -16,7 +16,7 @@ The full design, threat model, measured results and limitations are in
 | 1b active sensor challenge | `host_integrity.py` | Do the frames respond to a random brightness challenge sent to that sensor? | partial correlation < 0.9 (frames not produced by the challenged sensor) |
 | 2 sensor noise (PRNU) | `camera_sensor_noise_profiling.py` | Do the pixels carry the enrolled fingerprint of *the attested camera*? | PCE < 60 against the fingerprint enrolled for that camera ID + sensor mode |
 | 3 temporal / spectral | `temporal_consistency_analysis.py` | Is facial texture, lighting and motion temporally consistent? | anomaly score ≥ 0.60 |
-| 5 gated fusion | `pipeline.py`, `app.py` | Orchestration, early termination, final verdict | n/a |
+| 5 gated fusion | `pipeline.py`, `server.py` | Orchestration, early termination, final verdict | n/a |
 
 Layer 4 (rPPG) is specified but not implemented. The Android SDK in `app/src/main/java/...` is the mobile
 Layer 1 prototype; its JSON verdict can be evaluated with `host_integrity.evaluate_client_attestation`.
@@ -27,17 +27,22 @@ Layer 1 prototype; its JSON verdict can be evaluated with `host_integrity.evalua
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python deepfake_detector.py --fetch    # once: GenD weights (Gate 3) into models/hf/; later loads are offline
-streamlit run app.py
+cd web && npm install && npm run build && cd ..   # build the web UI (Node 20+)
+python server.py                       # http://localhost:8501
 ```
 
 Gates 1 and 2 have no learned weights. The app preloads the Gate 3 model in the background at startup
 (~3 s on a GPU), and the live video is streamed as MJPEG from `/api/live.mjpg`, at the camera's frame rate.
 
+For UI work, run `python server.py` and `npm run dev` in `web/` together: Vite serves the UI on
+:5173 with hot reload and proxies `/api` to the server. The UI is React + TypeScript with plain CSS
+(`web/src/styles/` for tokens and shared rules, one stylesheet beside each component and page).
+
 The **Live** page runs every check continuously on the camera, on one screen: live video, the verdict,
-a tile per gate, the fingerprint and motion scores over the last minute, the latest liveness pattern,
-and an event log. Press **Start**, then **Enroll camera** once (move the camera slowly for 5 s).
-**Simulate an attack** swaps the frames for a replay or an AI video mid-stream so you can watch the checks
-react. The camera is released on **Stop**, when you leave the page, or within 8 s of closing the tab.
+a card per gate, the camera-grain and AI-face scores over the last minute, the latest flash test,
+and an event log. Press **Start checking**. **Simulate an attack** swaps the frames for a replay, an AI
+video or an animated photo mid-stream so you can watch the checks react. The camera is released on
+**Stop checking**, when you leave the page, when the tab closes, or within 8 s of the page going quiet.
 **Analyze a file** and **Device** are secondary pages.
 
 Live session from the CLI:
@@ -65,13 +70,10 @@ Results are written to `benchmarks/results/BENCHMARK_RESULTS.md`.
 ## Repository layout
 
 ```
-app.py                              Server entry point: live MJPEG route, model preload (streamlit run app.py)
-streamlit_app.py                    Streamlit UI (top navigation)
+server.py                           Web server: JSON API, live MJPEG stream, model preload, serves web/dist
+web/                                React + TypeScript UI (Vite); src/pages = Live, Analyze a file, Device
 deepfake_detector.py                Gate 3: GenD face-deepfake model; --fetch caches weights in models/hf/
-app_pages/                          Live (main), Analyze a file, Device
 live_engine.py                      Real-time engine: capture + challenge thread, rolling analysis thread
-ui.py                               Shared verdict / gate-strip rendering (file analysis)
-.streamlit/config.toml              Theme (light and dark)
 pipeline.py                         Gated fusion: run_live_session, enroll_live_camera, run_detection_pipeline
 host_integrity.py                   Gate 1: V4L2/sysfs attestation, host checks, active sensor challenge
 camera_sensor_noise_profiling.py    Gate 2: PRNU residuals, fingerprints, reference PCE, blind motion-gated test

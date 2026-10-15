@@ -1,0 +1,150 @@
+.gates {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1.5px solid var(--ink);
+}
+
+.gate {
+  --gate-color: var(--ink-faint);
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: var(--space-2);
+  min-height: 190px;
+  padding: var(--space-5) var(--space-5) var(--space-5) 0;
+}
+
+.gate + .gate {
+  padding-left: var(--space-5);
+  border-left: 1px solid var(--ivory-line);
+}
+
+.gate--pass {
+  --gate-color: var(--blue);
+}
+
+.gate--block {
+  --gate-color: var(--coral);
+}
+
+.gate--flag {
+  --gate-color: var(--ink);
+}
+
+/* A failed gate is flooded coral: the one thing on the row the eye should land on. */
+.gate--block {
+  background: var(--coral);
+}
+
+.gate--block,
+.gate--block + .gate {
+  border-left-color: transparent;
+}
+
+.gate--block.gate {
+  padding-left: var(--space-5);
+}
+
+.gate__num {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 125;
+  font-weight: 900;
+  font-size: var(--step-3);
+  line-height: 1;
+  color: transparent;
+  -webkit-text-stroke: 1.2px var(--gate-color);
+}
+
+.gate--block .gate__num {
+  -webkit-text-stroke-color: var(--ink);
+}
+
+.gate__name {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: var(--step-2);
+  line-height: 1.05;
+}
+
+.gate__label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-variation-settings: "wdth" 105;
+  font-weight: 600;
+  font-size: var(--step--1);
+  line-height: 1.35;
+}
+
+.gate__dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--gate-color);
+  transform: translateY(-1px);
+}
+
+.gate--block .gate__dot {
+  background: var(--ink);
+}
+
+.gate--wait .gate__dot {
+  background: transparent;
+  border: 1.5px solid var(--ink-faint);
+  animation: dot-spin 1.2s linear infinite;
+  border-top-color: transparent;
+}
+
+@keyframes dot-spin {
+  to {
+    transform: translateY(-1px) rotate(360deg);
+  }
+}
+
+.gate__meta {
+  font-family: var(--font-mono);
+  font-size: var(--step--2);
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.gate--block .gate__meta {
+  color: var(--ink);
+}
+
+@media (max-width: 900px) {
+  .gates {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gate:nth-child(3) {
+    border-left-color: transparent;
+    padding-left: 0;
+  }
+
+  .gate:nth-child(n + 3) {
+    border-top: 1px solid var(--ivory-line);
+  }
+}
+
+@media (max-width: 480px) {
+  .gates {
+    grid-template-columns: 1fr;
+  }
+
+  .gate,
+  .gate + .gate {
+    min-height: 0;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .gate + .gate {
+    border-top: 1px solid var(--ivory-line);
+  }
+
+  .gate--block.gate {
+    padding-left: var(--space-4);
+  }
+}

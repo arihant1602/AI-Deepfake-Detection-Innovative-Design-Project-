@@ -288,7 +288,7 @@ Pipeline-level changes:
     less is `NO ANOMALY DETECTED` with a `limitations` list, e.g. "Gate 3 abstained (face found in
     0 frames)" or "no enrolled fingerprint: PRNU advisory".
 
-### 4.6 Live operation (`live_engine.py`, `app_pages/live.py`)
+### 4.6 Live operation (`live_engine.py`, `server.py`, `web/src/pages/Live.tsx`)
 
 The app runs the gates **continuously** on an open camera instead of on a recorded clip:
 
