@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, ApiError, type LiveSession, type Meta, type Snapshot } from "../lib/api";
+import { api, ApiError, type FlashPlan, type LiveSession, type Meta, type Snapshot } from "../lib/api";
 import { liveGates, liveVerdict, type GateState } from "../lib/gates";
 import { TopBarControls } from "../components/Header";
 import { Verdict } from "../components/Verdict";
@@ -14,10 +14,27 @@ const CHART_H = 112;
 // What each check does, shown before the camera starts.
 const IDLE_GATES: GateState[] = [
   { gate: "1a", name: "Real camera connected", status: "off", label: "A physical camera, not OBS, an emulator or a hooked driver." },
-  { gate: "1b", name: "Camera is live", status: "off", label: "We flicker the camera's brightness; only a live sensor follows." },
-  { gate: "2", name: "Has real camera grain", status: "off", label: "Real sensors add fresh grain to every frame; generated video is too clean." },
+  { gate: "1b", name: "Camera is live", status: "off", label: "We change brightness, colour and contrast at random; only a live sensor follows." },
+  { gate: "2", name: "Has real camera grain", status: "off", label: "Fresh grain in every frame, from the same sensor that passed the live test." },
   { gate: "3", name: "Face looks real", status: "off", label: "GenD looks for deepfake artefacts in the face." },
 ];
+
+/** Full-screen colour sequence for the screen-flash check; `offset` maps client to server time. */
+function ScreenFlashOverlay({ plan, offset, onDone }: { plan: FlashPlan; offset: number; onDone: () => void }) {
+  const [colour, setColour] = useState<string | null>(null);
+  useEffect(() => {
+    let raf = 0;
+    const frame = () => {
+      const k = Math.floor((Date.now() / 1000 + offset - plan.t0) / plan.slot_s);
+      if (k >= plan.seq.length) return onDone();
+      setColour(k < 0 ? null : plan.seq[k] > 0 ? plan.colours[0] : plan.colours[1]);
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [plan, offset, onDone]);
+  return colour ? <div className="screen-flash" style={{ background: colour }} aria-hidden="true" /> : null;
+}
 
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
@@ -28,6 +45,7 @@ export function Live() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flash, setFlash] = useState<{ plan: FlashPlan; offset: number } | null>(null);
   const tokenRef = useRef<string | null>(null);
 
   const running = Boolean(snap?.running);
@@ -106,6 +124,17 @@ export function Live() {
     }
   }, [session]);
 
+  const screenFlash = async () => {
+    if (!session) return;
+    try {
+      const r = await api.flash(session.token);
+      setFlash({ plan: r.plan, offset: r.now - Date.now() / 1000 });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const flashDone = useCallback(() => setFlash(null), []);
+
   const attack = async (mode: string) => {
     if (!session) return;
     try {
@@ -126,6 +155,7 @@ export function Live() {
 
   return (
     <main className="console">
+      {flash && <ScreenFlashOverlay plan={flash.plan} offset={flash.offset} onDone={flashDone} />}
       <TopBarControls>
         {meta && meta.devices.length > 0 ? (
           <label className="console__camera">
@@ -229,16 +259,25 @@ export function Live() {
             <p className="hint">Swaps frames after the camera driver, like a hooked capture call.</p>
           </div>
           <div className="dock__group dock__group--end">
-            <h2 className="label">Flash test</h2>
+            <h2 className="label">Live test</h2>
             <button
               className="btn"
               onClick={() => session && api.challenge(session.token)}
-              disabled={!running || snap?.in_challenge}
+              disabled={!running || snap?.in_challenge || Boolean(flash)}
+              title="Changes brightness and two random camera controls"
             >
-              Run now
+              Camera
+            </button>
+            <button
+              className="btn"
+              onClick={screenFlash}
+              disabled={!running || snap?.in_challenge || Boolean(flash || snap?.flash_plan)}
+              title="Flashes the screen in two colours for 5 seconds and looks for the light on your face"
+            >
+              Screen flash
             </button>
             <p className="mono dock__next">
-              {running && snap ? (snap.in_challenge ? "running" : `next in ${Math.round(snap.next_challenge_in)} s`) : "—"}
+              {running && snap ? (snap.in_challenge ? "running" : `next camera test in ${Math.round(snap.next_challenge_in)} s`) : "—"}
             </p>
           </div>
         </section>
@@ -286,9 +325,9 @@ export function Live() {
 
         <figure className="panel console__signal">
           <figcaption className="panel__head">
-            <span className="label">Last flash test</span>
-            <span className="panel__aside">
-              {lastFlash?.corr !== undefined ? `r ${lastFlash.corr.toFixed(2)} / min 0.90` : "—"}
+            <span className="label">Last camera test</span>
+            <span className="panel__aside" title={lastFlash?.control?.replaceAll("_", " ")}>
+              {lastFlash?.corr !== undefined ? `r ${lastFlash.corr.toFixed(2)} / min 0.85` : "—"}
             </span>
           </figcaption>
           {lastFlash?.attempt ? (

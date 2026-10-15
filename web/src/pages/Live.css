@@ -151,7 +151,7 @@
 }
 
 .dock__group--end {
-  grid-template-columns: auto auto;
+  grid-template-columns: auto auto auto;
   align-items: center;
   column-gap: var(--space-3);
 }
@@ -224,4 +224,14 @@
     flex: 1;
     width: auto;
   }
+}
+
+/* ---------------------------------------------------------------- screen flash */
+
+/* Covers the whole viewport while the screen-flash check runs; the colour is set inline. */
+.screen-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
 }

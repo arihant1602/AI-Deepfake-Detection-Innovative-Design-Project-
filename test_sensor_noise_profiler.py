@@ -16,6 +16,7 @@ from camera_sensor_noise_profiling import (
     LayerResult,
     compute_pce_and_ncc,
     pce_with_shift_search,
+    same_sensor_check,
     extract_noise_residual,
     zero_mean_normalize,
 )
@@ -216,3 +217,30 @@ class TestStoreAndSerialization(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSameSensorCheck(unittest.TestCase):
+    """Split and compare: challenge-attested frames vs the frames analysed afterwards."""
+
+    def test_same_sensor_matches_across_different_scenes(self):
+        attested = make_scene(30, prnu=SENSOR_K, seed=1)
+        later = make_scene(30, prnu=SENSOR_K, seed=2)
+        r = same_sensor_check(attested, later)
+        self.assertEqual(r["verdict"], "MATCH", r)
+
+    def test_other_sensor_or_no_sensor_mismatches(self):
+        attested = make_scene(30, prnu=SENSOR_K, seed=1)
+        for frames in (make_scene(30, prnu=OTHER_K, seed=2), make_scene(30, seed=3)):
+            self.assertEqual(same_sensor_check(attested, frames)["verdict"], "MISMATCH")
+
+    def test_cached_reference_fingerprint(self):
+        attested = make_scene(30, prnu=SENSOR_K, seed=1)
+        ref = CameraSensorNoiseProfiler().estimate_fingerprint_from_frames(attested)
+        r = same_sensor_check([], make_scene(30, prnu=SENSOR_K, seed=2), reference_fingerprint=ref)
+        self.assertEqual(r["verdict"], "MATCH")
+
+    def test_inconclusive_without_enough_frames_or_same_mode(self):
+        attested = make_scene(30, prnu=SENSOR_K, seed=1)
+        self.assertEqual(same_sensor_check(attested[:5], attested)["verdict"], "INCONCLUSIVE")
+        small = [cv2.resize(f, (128, 128)) for f in make_scene(30, seed=2)]
+        self.assertEqual(same_sensor_check(attested, small)["verdict"], "INCONCLUSIVE")

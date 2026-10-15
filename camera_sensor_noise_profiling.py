@@ -36,6 +36,18 @@ Default mode - blind live-noise test
 
   Outcomes: PRESENT, ABSENT (fails a check), INCONCLUSIVE (too little static area).
 
+Same-sensor check - split and compare, no enrollment
+  The frames read while the Gate 1b challenge runs are attested: they followed random
+  hardware-control commands, so they come from the physical sensor. A PRNU fingerprint
+  estimated from them is matched (PCE) against one estimated from the frames analysed in
+  between challenges. A stream that is switched to another source once the challenge is
+  over (a hook that passes real frames only while controls change) carries a different
+  sensor pattern, or none. Measured on the 640x480 MJPEG webcam: same camera PCE 9,600-
+  20,000; AI video, other cameras, an animated photo and AI video with re-injected noise
+  <= 14. A frozen frame of this camera with fresh noise reaches ~500 (a static scene leaks
+  into both fingerprints), and a replay of this camera's own frames matches by design:
+  those attacks are caught by the live-noise test and the challenge, not by this check.
+
 Optional mode - reference fingerprint (research API, not used by the app)
   PCE (Goljan et al. 2009) of the clip's PRNU residual against a fingerprint estimated
   earlier from the same camera.
@@ -88,6 +100,9 @@ CONFIG = {
     "pce_peak_radius": 2,
     "pce_search_radius": 2,           # the peak may sit a few pixels off (0,0): sensor-mode scaler/crop phase
     "pce_match_thresh": 60.0,         # standard PCE decision threshold (Goljan 2009)
+    # --- same-sensor check (split and compare, no enrollment) ---
+    "same_sensor_min_frames": 20,     # frames needed on each side
+    "same_sensor_pce_thresh": 60.0,
 }
 
 VERDICT_PRESENT = "PRESENT"
@@ -354,6 +369,38 @@ def live_noise_features(frames: Sequence[np.ndarray], cfg: Optional[dict] = None
         "colour_corr": corr(np.concatenate(d_b), np.concatenate(d_r)) if colour else None,
         "pairs": len(d_y),
     }
+    return out
+
+
+def same_sensor_check(reference_frames: Sequence[np.ndarray], frames: Sequence[np.ndarray],
+                      cfg: Optional[dict] = None, reference_fingerprint: Optional[np.ndarray] = None) -> dict:
+    """
+    Split-and-compare PRNU test: does `frames` come from the same sensor as `reference_frames`
+    (the frames attested by the Gate 1b challenge)? `reference_fingerprint`, when given, is the
+    fingerprint already estimated from `reference_frames` (the live engine caches it).
+    Returns MATCH / MISMATCH / INCONCLUSIVE with the PCE.
+    """
+    cfg = {**CONFIG, **(cfg or {})}
+    n_ref, n = len(reference_frames), len(frames)
+    out = {"verdict": VERDICT_INCONCLUSIVE, "pce": None, "peak_offset": None, "reference_frames": n_ref,
+           "current_frames": n, "threshold": cfg["same_sensor_pce_thresh"]}
+    need = cfg["same_sensor_min_frames"]
+    if (reference_fingerprint is None and n_ref < need) or n < need:
+        out["explanation"] = f"Too few frames to compare sensor patterns ({n_ref} attested, {n} current; {need} needed)."
+        return out
+    profiler = CameraSensorNoiseProfiler(cfg)
+    ref = reference_fingerprint if reference_fingerprint is not None else profiler.estimate_fingerprint_from_frames(reference_frames)
+    cur = profiler.estimate_fingerprint_from_frames(frames)
+    if ref.shape != cur.shape:
+        out["explanation"] = (f"Attested frames are {ref.shape[1]}x{ref.shape[0]} but the stream is "
+                              f"{cur.shape[1]}x{cur.shape[0]}; sensor patterns are only comparable in one mode.")
+        return out
+    pce, dy, dx = pce_with_shift_search(ref, cur, cfg["pce_search_radius"], cfg["pce_peak_radius"])
+    match = pce >= cfg["same_sensor_pce_thresh"]
+    out.update(verdict="MATCH" if match else "MISMATCH", pce=round(float(pce), 1), peak_offset=[dy, dx])
+    out["explanation"] = (f"Same sensor as the frames attested by the liveness check (PCE {pce:.0f})." if match else
+                          f"Sensor pattern differs from the frames attested by the liveness check (PCE {pce:.1f} < "
+                          f"{cfg['same_sensor_pce_thresh']:.0f}): the stream was switched to another source.")
     return out
 
 

@@ -2,10 +2,17 @@
 Real-time detection engine behind the live page.
 
 A capture thread owns the camera: it streams frames into a ring buffer and runs the
-Gate 1b sensor challenge every CHALLENGE_INTERVAL seconds (and immediately when live sensor
-noise disappears). An analysis thread re-runs Gate 2 (live sensor noise) and Gate 3
-(GenD face-deepfake probability) once per second on a rolling window and records every
-threshold crossing as an event.
+Gate 1b multi-control sensor challenge every CHALLENGE_INTERVAL seconds (and immediately when
+live sensor noise disappears or the sensor pattern changes). An analysis thread re-runs Gate 2
+(live sensor noise) and Gate 3 (GenD face-deepfake probability) once per second on a rolling
+window, and every SAME_SENSOR_INTERVAL seconds matches the PRNU of the current frames against
+the frames attested by the last passed challenge (Gate 2 same-sensor check). Every threshold
+crossing is recorded as an event.
+
+On request, request_screen_flash() schedules a random two-colour sequence that the browser
+shows full-screen; the light the screen throws on the user's face must follow it (screen-flash
+reflection check, part of Gate 1b). A replay held up to the camera, or an injected video, shows
+a face that was never lit by this screen.
 
 The camera is released when stop() is called, when the UI stops sending heartbeats for
 HEARTBEAT_TIMEOUT seconds (tab closed, page left), when another engine takes over the
@@ -31,15 +38,27 @@ import cv2
 import numpy as np
 
 import host_integrity as h
-from camera_sensor_noise_profiling import CameraSensorNoiseProfiler
+from camera_sensor_noise_profiling import CameraSensorNoiseProfiler, same_sensor_check
 from pipeline import get_deepfake_detector
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CHALLENGE_INTERVAL = 10.0     # seconds between liveness challenges
+MIN_CHALLENGE_GAP = 5.0       # seconds after a challenge before another can be requested
 HEARTBEAT_TIMEOUT = 8.0       # release the camera if the UI stops polling for this long
 WINDOW = 20                   # frames for the sensor-noise test (19 consecutive pairs; 8 needed)
 NOISE_T = 0.6                 # live-noise level threshold (check 1 of Gate 2), for the graph
+SAME_SENSOR_INTERVAL = 3.0    # seconds between same-sensor (PRNU split-and-compare) checks
+SAME_SENSOR_FRAMES = 30       # current frames compared against the attested challenge frames
 DEEPFAKE_FRAMES = 4           # face crops scored by GenD per tick (judged on a 3-tick median)
+# Screen flash: slots of 0.4 s keep colour changes at or below 2.5 per second (WCAG 2.3.1 allows
+# at most 3 flashes per second); no saturated red. Pairs are (RGB +, RGB -).
+FLASH_SLOTS = 12            # 12 independent slots: a random face passes r >= 0.7 by chance < 1 % of the time
+FLASH_SLOT_S = 0.4
+FLASH_LEAD_S = 0.8            # time for the browser to receive the plan before the first slot
+FLASH_PAIRS = [((255, 208, 0), (32, 64, 255)), ((0, 224, 255), (255, 64, 255))]
+FLASH_MAX_LAG_S = 0.35        # display + exposure + transfer latency searched
+FLASH_MIN_CORR = 0.7
+FLASH_MIN_EFFECT = 1.0        # grey levels along the colour axis between + and - slots, on the face
 INJECTIONS = {
     "none": "Off",
     "replay": "Replay of this camera's last 3 s",
@@ -67,6 +86,53 @@ def _shutdown_all():
 atexit.register(_shutdown_all)
 
 
+def analyze_screen_flash(items: list, plan: dict, face_box) -> dict:
+    """
+    Did the light from the screen show up on the face? `items` are (read time, frame) pairs
+    around the flash, `plan` the schedule shown by the browser, `face_box` (x, y, w, h).
+    The mean face colour is projected on the axis between the two screen colours and correlated
+    with the shown sequence (controlling for a linear trend, i.e. auto-exposure drift) over
+    0..FLASH_MAX_LAG_S of latency. PASS, NO_REFLECTION, or INCONCLUSIVE (no face, too few frames).
+    """
+    out = {"verdict": "INCONCLUSIVE", "corr": None, "effect": None, "lag_ms": None, "frames": len(items),
+           "colours": plan["colours"]}
+    if face_box is None:
+        out["details"] = "Screen flash inconclusive: no face in view to reflect the screen."
+        return out
+    if len(items) < 3 * FLASH_SLOTS:
+        out["details"] = f"Screen flash inconclusive: only {len(items)} frames during the flash."
+        return out
+    x, y, w, hh = (int(v) for v in face_box)
+    plus, minus = (np.array(c[::-1], np.float64) for c in plan["rgb"])  # BGR
+    axis = (plus - minus) / np.linalg.norm(plus - minus)
+    ts = np.array([t for t, _ in items])
+    vals = np.array([float(f[max(0, y):y + hh, max(0, x):x + w].reshape(-1, 3).mean(axis=0) @ axis) for _, f in items])
+    seq, slot = np.array(plan["seq"], np.float64), plan["slot_s"]
+    best = {"corr": -1.0, "effect": 0.0, "lag": 0.0}
+    for lag in np.arange(0.0, FLASH_MAX_LAG_S + 1e-9, 0.033):
+        k = np.floor((ts - lag - plan["t0"]) / slot).astype(int)
+        ok = (k >= 0) & (k < len(seq))
+        if ok.sum() < 2 * FLASH_SLOTS:
+            continue
+        v, c = vals[ok], seq[k[ok]]
+        z = np.column_stack([np.ones(len(v)), ts[ok] - ts[ok][0]])
+        proj = z @ np.linalg.pinv(z)
+        rv, rc = v - proj @ v, c - proj @ c
+        if np.linalg.norm(rv) < 1e-9 or np.linalg.norm(rc) < 1e-9:
+            continue
+        r = float(rv @ rc / (np.linalg.norm(rv) * np.linalg.norm(rc)))
+        if r > best["corr"]:
+            best = {"corr": r, "effect": 2.0 * float(rv @ rc / (rc @ rc)), "lag": float(lag)}
+    passed = best["corr"] >= FLASH_MIN_CORR and best["effect"] >= FLASH_MIN_EFFECT
+    out.update(verdict="PASS" if passed else "NO_REFLECTION", corr=round(best["corr"], 3),
+               effect=round(best["effect"], 2), lag_ms=round(best["lag"] * 1000))
+    out["details"] = (f"Screen light reflected on the face (r = {best['corr']:.2f}, {best['effect']:.1f} grey levels)."
+                      if passed else
+                      f"No screen reflection on the face (r = {best['corr']:.2f}, {best['effect']:.1f} grey levels): "
+                      "a replayed or injected face, or a room too bright for the screen to light it.")
+    return out
+
+
 class LiveEngine:
     def __init__(self, node: str, width: int = 640, height: int = 480):
         self.node, self.width, self.height = node, width, height
@@ -78,7 +144,7 @@ class LiveEngine:
         # Held by the analysis thread while it computes and by the challenge while it runs, so the
         # capture thread is never starved of CPU during the timing-sensitive liveness check.
         self.compute_lock = threading.Lock()
-        self.buffer: deque = deque(maxlen=150)   # (t, frame, during_challenge, injected)
+        self.buffer: deque = deque(maxlen=200)   # (t, frame, during_challenge, injected); holds a whole screen flash at 30 fps
         self.latest: Optional[np.ndarray] = None
         self.latest_t = 0.0
         self.face_box = None
@@ -90,6 +156,7 @@ class LiveEngine:
         self._frames_read = 0
         self.in_challenge = False
         self.next_challenge = 0.0
+        self._last_challenge_end = 0.0
 
         self.hw: Optional[dict] = None
         self.camera_id: Optional[str] = None
@@ -97,6 +164,12 @@ class LiveEngine:
         self.deepfake_hist: deque = deque(maxlen=120)  # (t, P(fake) or None, abstained)
         self.deepfake_threshold: Optional[float] = None
         self.challenges: deque = deque(maxlen=20)      # (t, result)
+        self.same_sensor: deque = deque(maxlen=60)     # (t, result of same_sensor_check)
+        self._attested_fp: Optional[np.ndarray] = None  # PRNU of the frames read in the last passed challenge
+        self._attested_n = 0
+        self._next_same_sensor = 0.0
+        self.flash_plan: Optional[dict] = None
+        self.screen_flashes: deque = deque(maxlen=10)  # (t, result)
         self.events: deque = deque(maxlen=40)          # (t, level, text)
 
         self.injection = "none"
@@ -138,8 +211,44 @@ class LiveEngine:
     def heartbeat(self):
         self.last_seen = time.time()
 
-    def request_challenge(self):
-        self.challenge_now.set()
+    def request_challenge(self, manual: bool = False):
+        # Automatic requests are ignored right after a challenge: the noise and same-sensor checks
+        # both ask for one when an attack starts, and back-to-back challenges would starve the
+        # analysis thread. A press of the button always counts.
+        if manual or (not self.in_challenge and time.time() - self._last_challenge_end >= MIN_CHALLENGE_GAP):
+            self.challenge_now.set()
+
+    def request_screen_flash(self) -> Optional[dict]:
+        """Schedules a screen-flash sequence and returns the plan the browser renders (epoch seconds)."""
+        if not self.running or self.flash_plan is not None:
+            return None
+        rng = secrets.SystemRandom()
+        plus, minus = FLASH_PAIRS[rng.randrange(len(FLASH_PAIRS))]
+        t0 = time.time() + FLASH_LEAD_S
+        plan = {"id": secrets.token_hex(4), "t0": t0, "slot_s": FLASH_SLOT_S,
+                "seq": h.make_challenge_sequence(FLASH_SLOTS, 5, rng),
+                "colours": ["#%02x%02x%02x" % plus, "#%02x%02x%02x" % minus], "rgb": [plus, minus]}
+        with self.lock:
+            self.flash_plan = plan
+            # Keep the camera challenge out of the way: its control changes would mask the reflection.
+            self.next_challenge = max(self.next_challenge, t0 + FLASH_SLOTS * FLASH_SLOT_S + 1.5)
+        self.log("info", "Screen flash: watching the light from the screen on the face")
+        return {k: v for k, v in plan.items() if k != "rgb"}
+
+    def _screen_flash_step(self):
+        plan = self.flash_plan
+        end = plan["t0"] + FLASH_SLOTS * plan["slot_s"]
+        if time.time() < end + FLASH_MAX_LAG_S + 0.2:
+            return
+        with self.lock:
+            items = [(t, f) for (t, f, ch, _) in self.buffer if plan["t0"] - 0.1 <= t <= end + FLASH_MAX_LAG_S + 0.1]
+            box = self.face_box
+            self.flash_plan = None
+        res = analyze_screen_flash(items, plan, box)
+        with self.lock:
+            self.screen_flashes.appendleft((time.time(), res))
+        level = {"PASS": "ok", "NO_REFLECTION": "warn"}.get(res["verdict"], "info")
+        self.log(level, res["details"])
 
     def set_injection(self, mode: str):
         if mode == self.injection:
@@ -240,17 +349,27 @@ class LiveEngine:
             try:
                 for _ in range(3):  # drop frames queued while waiting for the lock
                     self._read(cap, True)
+                attested: list = []
                 res = h.run_sensor_challenge(self.node, lambda: self._read(cap, True, with_timestamp=True),
-                                             cfg={"attempts": 2})
+                                             cfg={"attempts": 2, "on_challenge_frame": attested.append})
+                if res["verdict"] == "PASS" and len(attested) >= 20:
+                    # These frames followed the random control commands, so they are the sensor's own:
+                    # their PRNU is the reference the frames between challenges must match.
+                    self._attested_fp = self._prnu.estimate_fingerprint_from_frames(attested)
+                    self._attested_n = len(attested)
+                    self._next_same_sensor = 0.0
             finally:
                 self.in_challenge = False
+                self._last_challenge_end = time.time()
         with self.lock:
             prev = self.challenges[0][1]["verdict"] if self.challenges else None
             self.challenges.appendleft((time.time(), res))
         if res["verdict"] == "FAIL":
-            self.log("block", f"Liveness check failed: frames ignored the brightness pattern (r = {res.get('corr', 0):.2f})")
+            missed = [n for n, c in (res.get("channels") or {}).items() if not c["passed"]]
+            self.log("block", f"Liveness check failed: frames ignored the {', '.join(missed) or 'control'} pattern "
+                              f"(lowest r = {res.get('corr', 0):.2f})")
         elif res["verdict"] == "PASS" and prev != "PASS":
-            self.log("ok", f"Liveness check passed (r = {res.get('corr', 0):.2f})")
+            self.log("ok", f"Liveness check passed: {res['control']} (lowest r = {res.get('corr', 0):.2f})")
         elif res["verdict"] == "UNSUPPORTED":
             self.log("warn", res["details"])
 
@@ -276,6 +395,10 @@ class LiveEngine:
         while not self.stop_evt.wait(0.5):
             with self.compute_lock:
                 self._noise_step(det)
+                if time.time() >= self._next_same_sensor:
+                    self._same_sensor_step()
+                if self.flash_plan is not None:
+                    self._screen_flash_step()
             if self.stop_evt.wait(0.5):
                 break
             if det is not None:
@@ -300,6 +423,24 @@ class LiveEngine:
             self.request_challenge()
         elif r.verdict == "PRESENT" and prev == "ABSENT":
             self.log("ok", "Live sensor noise back")
+
+    def _same_sensor_step(self):
+        if self._attested_fp is None:
+            return
+        frames = self._window(SAME_SENSOR_FRAMES)
+        if len(frames) < SAME_SENSOR_FRAMES:
+            return
+        self._next_same_sensor = time.time() + SAME_SENSOR_INTERVAL
+        r = same_sensor_check([], frames, reference_fingerprint=self._attested_fp)
+        r["reference_frames"] = self._attested_n
+        prev = self.same_sensor[-1][1]["verdict"] if self.same_sensor else None
+        with self.lock:
+            self.same_sensor.append((time.time(), r))
+        if r["verdict"] == "MISMATCH" and prev != "MISMATCH":
+            self.log("block", r["explanation"])
+            self.request_challenge()
+        elif r["verdict"] == "MATCH" and prev == "MISMATCH":
+            self.log("ok", f"Same sensor as the liveness check again (PCE {r['pce']:.0f})")
 
     def _deepfake_step(self, det):
         frames = self._window(WINDOW)
@@ -334,6 +475,9 @@ class LiveEngine:
                 "deepfake_threshold": self.deepfake_threshold,
                 "deepfake_smoothed": self.deepfake_smoothed(),
                 "challenges": list(self.challenges), "events": list(self.events),
+                "same_sensor": list(self.same_sensor),
+                "screen_flashes": list(self.screen_flashes),
+                "flash_plan": {k: v for k, v in self.flash_plan.items() if k != "rgb"} if self.flash_plan else None,
                 "injection": self.injection, "face_box": self.face_box,
                 "started": self.started,
             }

@@ -145,6 +145,8 @@ def _snapshot(eng: LiveEngine) -> dict:
             {"attempt": ch["attempts"][-1]} if i == 0 and ch.get("attempts") else {})
         chs.append({"t": t, **ch})
     s["challenges"] = chs
+    s["same_sensor"] = [{"t": t, **r} for t, r in s["same_sensor"][-30:]]
+    s["screen_flashes"] = [{"t": t, **r} for t, r in s["screen_flashes"]]
     s["noise"] = [{"t": t, "sigma": v, "verdict": verdict, "failed": failed} for t, v, verdict, failed in s["noise"]]
     s["deepfake"] = [{"t": t, "p": p, "abstained": a} for t, p, a in s["deepfake"]]
     s["events"] = [{"t": t, "level": lvl, "text": txt} for t, lvl, txt in s["events"]]
@@ -168,8 +170,16 @@ async def live_stop(request):
 
 async def live_challenge(request):
     eng = _engine((await _body(request)).get("token", ""))
-    eng.request_challenge()
+    eng.request_challenge(manual=True)
     return ok({"requested": True})
+
+
+async def live_flash(request):
+    eng = _engine((await _body(request)).get("token", ""))
+    plan = eng.request_screen_flash()
+    if plan is None:
+        raise HTTPException(409, "A screen flash is already running, or the camera is off.")
+    return ok({"plan": plan, "now": time.time()})
 
 
 async def live_attack(request):
@@ -356,6 +366,7 @@ routes = [
     Route("/api/live/state", live_state),
     Route("/api/live/stop", live_stop, methods=["POST"]),
     Route("/api/live/challenge", live_challenge, methods=["POST"]),
+    Route("/api/live/flash", live_flash, methods=["POST"]),
     Route("/api/live/attack", live_attack, methods=["POST"]),
     Route("/api/live.mjpg", live_mjpeg),
     Route("/api/analyze", analyze, methods=["POST"]),

@@ -20,19 +20,56 @@ export interface Meta {
   challenge_interval: number;
 }
 
+export interface ChallengeChannel {
+  corr: number;
+  effect: number;
+  lag: number;
+  passed: boolean;
+}
+
 export interface ChallengeAttempt {
   luma: number[];
   command: number[];
   levels: [number, number];
   corr: number;
+  channels?: Record<string, ChallengeChannel>;
 }
 
 export interface Challenge {
   t: number;
   verdict: "PASS" | "FAIL" | "UNSUPPORTED";
   corr?: number;
+  control?: string;
+  controls?: string[];
+  channels?: Record<string, ChallengeChannel>;
   details?: string;
   attempt?: ChallengeAttempt;
+}
+
+/** PRNU of the current frames matched against the frames attested by the last passed challenge. */
+export interface SameSensor {
+  t?: number;
+  verdict: "MATCH" | "MISMATCH" | "INCONCLUSIVE";
+  pce: number | null;
+  threshold: number;
+  explanation?: string;
+}
+
+/** A colour sequence the browser shows full-screen; times are server epoch seconds. */
+export interface FlashPlan {
+  id: string;
+  t0: number;
+  slot_s: number;
+  seq: number[];
+  colours: [string, string];
+}
+
+export interface ScreenFlash {
+  t: number;
+  verdict: "PASS" | "NO_REFLECTION" | "INCONCLUSIVE";
+  corr: number | null;
+  effect: number | null;
+  details: string;
 }
 
 export interface NoisePoint {
@@ -70,6 +107,9 @@ export interface Snapshot {
   deepfake_threshold: number | null;
   deepfake_smoothed: number | null;
   challenges: Challenge[];
+  same_sensor: SameSensor[];
+  screen_flashes: ScreenFlash[];
+  flash_plan: FlashPlan | null;
   events: LiveEvent[];
   injection: string;
   started: number;
@@ -110,6 +150,7 @@ export interface GateDetails {
   mode?: string;
   enforced?: boolean;
   pce_score?: number;
+  same_sensor?: SameSensor;
   noise_sigma?: number;
   failed_checks?: string[];
   frames_analyzed?: number;
@@ -158,6 +199,7 @@ export const api = {
   state: (token: string) => request<Snapshot>(`/api/live/state?token=${encodeURIComponent(token)}`),
   stop: (token: string) => post<{ stopped: boolean }>("/api/live/stop", { token }),
   challenge: (token: string) => post<{ requested: boolean }>("/api/live/challenge", { token }),
+  flash: (token: string) => post<{ plan: FlashPlan; now: number }>("/api/live/flash", { token }),
   attack: (token: string, mode: string) => post<{ injection: string }>("/api/live/attack", { token, mode }),
   streamUrl: (token: string) => `/api/live.mjpg?token=${encodeURIComponent(token)}`,
   // Releases the camera even while the tab is closing.

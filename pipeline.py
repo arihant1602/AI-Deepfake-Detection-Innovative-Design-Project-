@@ -30,7 +30,7 @@ import host_integrity
 
 try:
     from camera_sensor_noise_profiling import (
-        CameraSensorNoiseProfiler, read_video_frames, VERDICT_INCONCLUSIVE, VERDICT_PRESENT,
+        CameraSensorNoiseProfiler, read_video_frames, same_sensor_check, VERDICT_INCONCLUSIVE, VERDICT_PRESENT,
     )
     HAS_LAYER_2 = True
     prnu_profiler = CameraSensorNoiseProfiler()
@@ -381,7 +381,8 @@ def run_live_session(
       1. passive Gate 1 probe of `camera_node` (BLOCK => the camera is never opened)
       2. open the node, warm up, run the active sensor challenge on the same stream (FAIL => BLOCK)
       3. capture `n_frames` raw frames
-      4. Gate 2 live sensor-noise test on the raw frames (enforced)
+      4. Gate 2 live sensor-noise test on the raw frames, and the same-sensor check of those
+         frames against the challenge frames (both enforced)
       5. Gate 3 on the same raw frames
     """
     t0 = time.perf_counter()
@@ -414,6 +415,11 @@ def run_live_session(
 
     prnu = check_sensor_noise(frames=frames, enforce=True)
     prnu["camera_id"] = hw.get("camera_id")
+    if HAS_LAYER_2 and cap.get("challenge_frames") and challenge and challenge.get("verdict") == "PASS":
+        same = same_sensor_check(cap["challenge_frames"], frames)
+        prnu["same_sensor"] = same
+        if same["verdict"] == "MISMATCH" and prnu["passed"]:
+            prnu.update(passed=False, flagged=True, explanation=same["explanation"])
     timings["gate2_ms"] = prnu.get("latency_ms", 0.0)
     if not prnu["passed"]:
         return {"verdict": VERDICT_INJECTION_PRNU, "gate": 2, "details": prnu, "attestation": {**hw, "challenge": challenge},
@@ -433,7 +439,7 @@ def run_live_session(
         "gate": None,
         "frames": [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames[:32]],
         "frames_bgr": frames,
-        "capture": {k: v for k, v in cap.items() if k not in ("frames", "challenge")},
+        "capture": {k: v for k, v in cap.items() if k not in ("frames", "challenge", "challenge_frames")},
         "details": {"attestation": {**hw, "challenge": challenge}, "prnu": prnu, "temporal": temporal},
         "timings": timings,
     }

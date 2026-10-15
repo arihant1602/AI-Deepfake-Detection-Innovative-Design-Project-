@@ -6,6 +6,7 @@ Discovers and executes all unit and integration test suites:
   - Layer 2: test_sensor_noise_profiler.py (PRNU Analysis)
   - Layer 3: test_temporal_consistency.py (Temporal & Frequency Analysis)
   - Layer 5: test_pipeline.py (Gated Verification Pipeline & Attestation)
+  - Live engine: test_live_checks.py (screen-flash reflection check)
 """
 
 import sys
@@ -21,6 +22,7 @@ def main():
         "test_sensor_noise_profiler",
         "test_temporal_consistency",
         "test_pipeline",
+        "test_live_checks",
     ]
 
     print("=" * 70)

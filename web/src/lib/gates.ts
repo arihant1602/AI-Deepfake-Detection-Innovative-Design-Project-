@@ -41,17 +41,33 @@ export function liveGates(s: Snapshot): GateState[] {
 
   let g1b: GateState;
   const ch = s.challenges[0];
+  const flash = s.screen_flashes[0];
   if (s.in_challenge) {
-    g1b = { gate: "1b", name: "Camera is live", status: "flag", label: "Flash test running" };
+    g1b = { gate: "1b", name: "Camera is live", status: "flag", label: "Camera test running" };
+  } else if (s.flash_plan) {
+    g1b = { gate: "1b", name: "Camera is live", status: "flag", label: "Screen flash running" };
   } else if (ch) {
     const passed = ch.verdict === "PASS";
+    const missed = Object.entries(ch.channels ?? {})
+      .filter(([, c]) => !c.passed)
+      .map(([name]) => name.replace("_", " "));
     g1b = {
       gate: "1b",
       name: "Camera is live",
       status: passed ? "pass" : ch.verdict === "FAIL" ? "block" : "off",
-      label: passed ? "Yes" : ch.verdict === "FAIL" ? "No, the video ignored the flash" : "Can't test this camera",
-      value: `tested ${Math.max(0, Math.round(now - ch.t))} s ago`,
+      label: passed
+        ? "Yes"
+        : ch.verdict === "FAIL"
+          ? `No, the video ignored the ${missed.join(" and ") || "camera"} change`
+          : "Can't test this camera",
+      value: [ch.controls?.length ? `${ch.controls.length} controls` : null, `tested ${Math.max(0, Math.round(now - ch.t))} s ago`]
+        .filter(Boolean)
+        .join(" · "),
     };
+    // The screen flash is advisory: a bright room can drown the reflection, so a miss only flags.
+    if (passed && flash?.verdict === "NO_REFLECTION")
+      g1b = { ...g1b, status: "flag", label: "Yes, but the screen flash didn't light the face" };
+    else if (passed && flash?.verdict === "PASS") g1b = { ...g1b, value: `screen reflection seen · ${g1b.value}` };
   } else {
     g1b = { gate: "1b", name: "Camera is live", status: "wait", label: "Testing" };
   }
@@ -62,6 +78,10 @@ export function liveGates(s: Snapshot): GateState[] {
   else if (n?.verdict === "ABSENT")
     g2 = { ...g2, status: "block", label: "No", value: n.failed[0] ? PLAIN_NOISE[n.failed[0]] ?? n.failed[0] : undefined };
   else if (n) g2 = { ...g2, label: "Hold still a moment" };
+  const same = s.same_sensor.at(-1);
+  if (same?.verdict === "MISMATCH")
+    g2 = { ...g2, status: "block", label: "No, the sensor changed after the live test", value: `PCE ${Math.round(same.pce ?? 0)}` };
+  else if (same?.verdict === "MATCH" && g2.status === "pass") g2 = { ...g2, value: "same sensor as the live test" };
 
   const thr = s.deepfake_threshold;
   let g3: GateState = {
@@ -139,6 +159,14 @@ export function fileGates(r: AnalysisResult): GateState[] {
   const prnu: GateDetails | undefined = d.prnu ?? r.prnu ?? (gate === 2 ? d : undefined);
   let g2: GateState;
   if (gate === 1 || !prnu) g2 = { gate: "2", name: "Sensor noise", status: "off", label: "Not run" };
+  else if (prnu.same_sensor?.verdict === "MISMATCH")
+    g2 = {
+      gate: "2",
+      name: "Sensor noise",
+      status: "block",
+      label: "Different sensor than the live test",
+      value: `PCE ${Math.round(prnu.same_sensor.pce ?? 0)}`,
+    };
   else if (prnu.mode === "reference" && (prnu.verdict === "PRESENT" || prnu.verdict === "ABSENT")) {
     const match = prnu.verdict === "PRESENT";
     g2 = {

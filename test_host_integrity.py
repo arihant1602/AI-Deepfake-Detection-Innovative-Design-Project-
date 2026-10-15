@@ -198,6 +198,49 @@ class TestSensorChallengeAnalysis(unittest.TestCase):
         self.assertFalse(r["passed"])
 
 
+class TestMultiControlChallenge(unittest.TestCase):
+    cfg = h.CHALLENGE_CONFIG
+    specs = {n: h.CHALLENGE_CHANNELS[n] for n in ("brightness", "contrast", "hue")}
+
+    def drive(self, seed, respond=("brightness", "contrast", "hue"), crosstalk=0.0):
+        rng = np.random.default_rng(seed)
+        seqs = h.make_independent_sequences(3, self.cfg["slots"], self.cfg["min_sign_changes"],
+                                            self.cfg["max_sequence_corr"], random.Random(seed))
+        cmd = {n: np.repeat(s, self.cfg["frames_per_slot"]).astype(float) for n, s in zip(self.specs, seqs)}
+        k = len(cmd["brightness"])
+        on = {n: (1.0 if n in respond else 0.0) for n in self.specs}
+        feats = {
+            "luma": 22 * on["brightness"] * cmd["brightness"] + crosstalk * cmd["contrast"]
+                    + np.linspace(0, 8, k) + rng.normal(0, 1.0, k),
+            "spread": 0.3 * on["contrast"] * cmd["contrast"] + rng.normal(0, 0.02, k),
+            "chroma": rng.normal(0, 0.02, k),
+            "hue": -17 * on["hue"] * cmd["hue"] + rng.normal(0, 1.0, k),  # this camera rotates the other way
+            "wb": rng.normal(0, 0.01, k),
+        }
+        return h.analyze_multi_response(feats, {n: list(c) for n, c in cmd.items()}, self.specs,
+                                        self.cfg["max_lag"], self.cfg["min_corr"])
+
+    def test_sequences_are_independent(self):
+        for i in range(30):
+            seqs = h.make_independent_sequences(3, 12, 5, 0.34, random.Random(i))
+            for a in range(3):
+                self.assertEqual(sum(seqs[a]), 0)
+                for b in range(a):
+                    self.assertLessEqual(abs(np.dot(seqs[a], seqs[b])) / 12, 0.34)
+
+    def test_live_sensor_passes_every_control(self):
+        for seed in range(10):
+            r = self.drive(seed, crosstalk=-5.0)  # contrast also moves mean luma, as on the test webcam
+            self.assertTrue(all(c["passed"] for c in r.values()), r)
+
+    def test_brightness_only_replay_fails_the_other_controls(self):
+        # An attacker that reads the brightness control and fakes it on replayed frames.
+        for seed in range(10):
+            r = self.drive(seed, respond=("brightness",))
+            self.assertTrue(r["brightness"]["passed"])
+            self.assertFalse(r["contrast"]["passed"] or r["hue"]["passed"], r)
+
+
 class TestClientPayloads(unittest.TestCase):
     def test_presets(self):
         self.assertEqual(h.evaluate_client_attestation("Clean Physical Device")["verdict"], "PASS")
